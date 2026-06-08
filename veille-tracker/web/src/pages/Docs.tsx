@@ -188,11 +188,10 @@ export default function Docs() {
               rows={[
                 ["Backend",    "FastAPI + Python 3.12",    "API REST, orchestration pipeline"],
                 ["Base de données", "MariaDB 11",          "Stockage articles, tags, embeddings"],
-                ["LLM enrichissement", "qwen3.5:9b",       "Résumé + extraction de tags"],
-                ["LLM fact-check A", "qwen3.5:9b",         "Vérification factuelle primaire"],
-                ["LLM fact-check B", "llama3.2:3b",        "Vérification factuelle secondaire"],
+                ["LLM principal", "qwen3.5:9b",            "Enrichissement (résumé+tags) + fact-check primaire"],
+                ["LLM secondaire", "llama3.2:3b",          "Fact-check secondaire uniquement (contre-vérification)"],
                 ["Embeddings",  "nomic-embed-text",         "Vecteurs sémantiques 768 dim."],
-                ["Scheduler",   "APScheduler",             "Collecte périodique (cron)"],
+                ["Scheduler",   "APScheduler",             "Collecte via CronTrigger + pipeline continu (thread)"],
                 ["Frontend",    "React 19 + Vite",         "Interface utilisateur"],
                 ["Déploiement", "Docker Compose",           "Conteneurisation"],
               ]}
@@ -220,11 +219,26 @@ export default function Docs() {
             />
           </Sub>
 
-          <Sub title="Étape 1 — Collecte (toutes les 30 min pour RSS, toutes les 2h pour API)">
+          <Sub title="Étape 1 — Collecte">
             <P>
-              Chaque source active est collectée en parallèle. Le collecteur parse le flux,
-              déduplique les URLs (vérification en base + set en mémoire), et insère par lots de 50.
-              Un <code className="text-indigo-300 bg-gray-900 px-1 rounded">CollectLog</code> est
+              La collecte est déclenchée par <strong className="text-gray-300">APScheduler</strong> via
+              des expressions cron configurables. RSS et API ont des fréquences différentes.
+            </P>
+            <Table
+              headers={["Type source", "Fréquence", "Expression cron (.env)"]}
+              rows={[
+                ["RSS / Atom",  "toutes les 30 min", "RSS_COLLECT_INTERVAL=*/30 * * * *"],
+                ["arXiv / HN",  "toutes les 2h",     "ARXIV_COLLECT_INTERVAL=0 */2 * * *"],
+              ]}
+            />
+            <P>
+              Le bouton "Collect now" dans l'Admin déclenche une collecte immédiate hors planning
+              pour une source spécifique, sans attendre le prochain tick cron.
+            </P>
+            <P>
+              Chaque collecteur déduplique les URLs (vérification en base + set en mémoire intra-batch)
+              et insère par lots de 50. Un{" "}
+              <code className="text-indigo-300 bg-gray-900 px-1 rounded">CollectLog</code> est
               créé à chaque run avec le nombre d'articles et les erreurs éventuelles.
             </P>
             <Table
@@ -235,6 +249,23 @@ export default function Docs() {
                 ["HN",     "Algolia API",     "Requête search_by_date, filtre par mots-clés IA ou requête ciblée via ?query="],
               ]}
             />
+          </Sub>
+
+          <Sub title="Pipeline — thread continu (pas du cron)">
+            <P>
+              Contrairement à la collecte, le pipeline de traitement (enrichissement, embedding,
+              scoring, clustering) tourne dans un <strong className="text-gray-300">thread Python dédié</strong> qui
+              s'exécute en boucle permanente, indépendamment de tout scheduler cron.
+            </P>
+            <Code>{`# Logique du pipeline continu (scheduler.py)
+while True:
+    lancer en parallèle : enricher×3 + scorer×3 + embedder×1 + cluster×1
+    attendre que tous les workers terminent
+    si rien à traiter → dormir 15 secondes
+    sinon             → cycle suivant immédiatement
+
+→ Dès qu'un article est collecté, il est traité dans les secondes qui suivent.
+→ Aucune latence d'attente de tick cron pour le pipeline.`}</Code>
           </Sub>
 
           <Sub title="Étape 2 — Enrichissement (qwen3.5:9b, 3 workers en parallèle)">
@@ -389,41 +420,81 @@ Exemple : 3 claims vérifiables, 2 "supported", 1 "contested"
           </P>
 
           <Sub title="Modèles utilisés">
+            <P>
+              Un seul LLM secondaire est dédié à la contre-vérification. qwen3.5 fait à la fois
+              l'enrichissement et le fact-check primaire — llama3.2 intervient uniquement
+              en tant que second avis sur les claims factuels.
+            </P>
             <Table
-              headers={["Rôle", "Modèle", "Taille VRAM", "Famille"]}
+              headers={["Rôle", "Modèle", "VRAM (ROCm)", "Famille"]}
               rows={[
-                ["Enrichissement + Fact-check A", "qwen3.5:9b",  "~7.9 GB", "Qwen / Alibaba"],
-                ["Fact-check B",                  "llama3.2:3b", "~5.1 GB", "Llama / Meta"],
-                ["Embeddings",                    "nomic-embed-text", "~0.7 GB", "Nomic"],
+                ["Enrichissement (résumé+tags) + Fact-check primaire", "qwen3.5:9b",      "~7.9 GB", "Qwen / Alibaba"],
+                ["Fact-check secondaire uniquement",                   "llama3.2:3b",     "~5.1 GB", "Llama / Meta"],
+                ["Embeddings",                                          "nomic-embed-text","~0.7 GB", "Nomic"],
               ]}
             />
             <P>
               Les trois modèles coexistent en VRAM simultanément (total ~13.7 GB sur 15.9 GB
-              disponibles). Aucun swap de modèle n'est nécessaire pendant le pipeline.
+              disponibles sur le LXC-AI). Aucun swap n'est nécessaire pendant le pipeline.
+              Note : sur AMD ROCm, les modèles quantisés sont dequantisés en FP16 au chargement,
+              ce qui explique que llama3.2:3b (2 GB sur disque) occupe ~5 GB en VRAM.
             </P>
           </Sub>
 
-          <Sub title="Logique de consensus">
+          <Sub title="Mécanisme de comparaison — comparaison positionnelle">
             <P>
-              Pour chaque claim extrait par le modèle A, le verdict du modèle B (même index)
-              est comparé. La règle de fusion :
+              Les deux modèles reçoivent le <strong className="text-gray-300">même prompt</strong> sur
+              le même article et produisent chacun une liste de 3-5 claims. La comparaison
+              se fait ensuite <strong className="text-gray-300">par index positionnel</strong> :
+              claim[0] de qwen est comparé à claim[0] de llama, claim[1] à claim[1], etc.
             </P>
+            <Code>{`Article : "GPT-5 atteint 92% sur MMLU, dépasse les experts humains selon OpenAI"
+
+qwen3.5 extrait :                        llama3.2 extrait :
+  [0] "GPT-5 scores 92% on MMLU"           [0] "GPT-5 achieves 92% on MMLU"
+      → supported                               → supported
+  [1] "Surpasses human experts"            [1] "Beats human performance"
+      → unsupported                             → contested
+  [2] "Published by OpenAI"               [2] "OpenAI claims superiority"
+      → supported                               → unsupported
+
+Fusion index par index :
+  [0] supported + supported  → supported  (accord ✅)
+  [1] unsupported + contested → contested  (désaccord ⚠️ → crédit 50%)
+  [2] supported + unsupported → contested  (désaccord ⚠️ → crédit 50%)`}</Code>
+
+            <P>
+              <strong className="text-yellow-400">Limite connue :</strong> les deux modèles
+              n'extraient pas nécessairement les <em>mêmes</em> claims dans le même ordre.
+              Si qwen extrait les performances techniques et llama extrait les enjeux business,
+              la comparaison par index met en regard des affirmations sans rapport. C'est une
+              heuristique — pas une correspondance sémantique exacte.
+            </P>
+            <P>
+              Malgré cette limite, le dual-LLM apporte de la valeur sur deux points :
+              (1) <strong className="text-gray-300">fallback</strong> — si un modèle échoue (timeout, réseau),
+              l'autre prend le relais sans bloquer le pipeline ;
+              (2) <strong className="text-gray-300">biais croisés</strong> — quand deux modèles de familles
+              différentes (Alibaba vs Meta, bases d'entraînement distinctes) sont globalement
+              en accord sur un article, c'est un signal plus fort qu'un verdict unique.
+            </P>
+          </Sub>
+
+          <Sub title="Règles de fusion par claim">
             <Table
-              headers={["Modèle A (qwen3.5)", "Modèle B (llama3.2)", "Consensus", "Crédit scoring"]}
+              headers={["qwen3.5 (primaire)", "llama3.2 (secondaire)", "Consensus stocké", "Crédit scoring"]}
               rows={[
-                ["supported",    "supported",    <Badge color="bg-green-900/40 text-green-300">supported</Badge>,   "100%"],
-                ["unsupported",  "unsupported",  <Badge color="bg-red-900/40 text-red-300">unsupported</Badge>,     "0%"],
-                ["unverifiable", "— (tout)",     <Badge color="bg-gray-800 text-gray-300">unverifiable</Badge>,     "exclu du calcul"],
-                ["supported",    "unsupported",  <Badge color="bg-yellow-900/40 text-yellow-300">contested</Badge>, "50%"],
-                ["unsupported",  "supported",    <Badge color="bg-yellow-900/40 text-yellow-300">contested</Badge>, "50%"],
-                ["— (tout)",     "unverifiable", <Badge color="bg-gray-800 text-gray-300">unverifiable</Badge>,     "exclu du calcul"],
+                ["supported",    "supported",    <Badge color="bg-green-900/40 text-green-300">supported</Badge>,     "100%"],
+                ["unsupported",  "unsupported",  <Badge color="bg-red-900/40 text-red-300">unsupported</Badge>,       "0%"],
+                ["unverifiable", "— (tout)",     <Badge color="bg-gray-800 text-gray-300">unverifiable</Badge>,       "exclu du calcul"],
+                ["supported",    "unsupported",  <Badge color="bg-yellow-900/40 text-yellow-300">contested</Badge>,   "50%"],
+                ["unsupported",  "supported",    <Badge color="bg-yellow-900/40 text-yellow-300">contested</Badge>,   "50%"],
+                ["— (tout)",     "unverifiable", <Badge color="bg-gray-800 text-gray-300">unverifiable</Badge>,       "exclu du calcul"],
+                ["— (échec)",    "— (succès)",   "résultat llama seul",                                               "normal"],
+                ["— (succès)",   "— (échec)",    "résultat qwen seul",                                                "normal"],
+                ["— (échec)",    "— (échec)",    "score neutre 60",                                                   "—"],
               ]}
             />
-            <P>
-              Si l'un des modèles échoue (timeout, erreur réseau), le résultat de l'autre est utilisé
-              seul — le pipeline ne bloque jamais. Si les deux échouent, le score fact-check prend
-              la valeur neutre de 60.
-            </P>
           </Sub>
         </Section>
 
@@ -554,11 +625,15 @@ B et C sont masqués (deduplicate=true par défaut)`}</Code>
           </Sub>
 
           <Sub title="Fréquences de collecte">
+            <P>
+              Configurables via les variables d'environnement en syntaxe cron standard
+              (interprétées par APScheduler CronTrigger). Voir la section Pipeline pour le détail.
+            </P>
             <Table
-              headers={["Source", "Fréquence", "Variable d'environnement"]}
+              headers={["Source", "Défaut", "Variable .env"]}
               rows={[
-                ["RSS / Atom",  "Toutes les 30 minutes", "RSS_COLLECT_INTERVAL=*/30 * * * *"],
-                ["arXiv / HN",  "Toutes les 2 heures",   "ARXIV_COLLECT_INTERVAL=0 */2 * * *"],
+                ["RSS / Atom",  "*/30 * * * * (toutes les 30 min)", "RSS_COLLECT_INTERVAL"],
+                ["arXiv / HN",  "0 */2 * * * (toutes les 2h)",      "ARXIV_COLLECT_INTERVAL"],
               ]}
             />
           </Sub>
