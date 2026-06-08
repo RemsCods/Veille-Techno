@@ -815,4 +815,159 @@ if abs(delta) > 8:                                     # max ±8 par run
 
 ---
 
+## Session 14 (suite) — Hotfix dual LLM + page Documentation
+
+### Bugfix dual LLM — deux régressions bloquantes
+
+Après déploiement de session 14, le scoring était en erreur à 100% (1472 err/min observés dans l'Admin).
+
+#### Bug 1 — KeyError dans le prompt fact-check (bloquant)
+
+**Cause :** le template de prompt contenait des accolades JSON littérales `{"claims": [...]}` et était formaté avec `.format(title=..., text=...)`. Python interprétait `"claims"` comme une clé de formatage → `KeyError: '"claims"'`. Cette ligne était hors du `try/except` → l'exception remontait jusqu'au scorer qui l'enregistrait comme score_error.
+
+```python
+# ❌ AVANT
+_FACTCHECK_PROMPT_TEMPLATE = (
+    '{"claims": [{"text": "...", "status": "..."}]}\n\n'  # accolades interprétées
+    "Title: {title}\nContent: {text}"
+)
+prompt = _FACTCHECK_PROMPT_TEMPLATE.format(title=title, text=text)  # hors du try
+
+# ✅ APRÈS — concaténation simple, construction dans le try
+prompt = (
+    '...Return ONLY valid JSON: {"claims": [{"text": "...", "status": "..."}]}'
+    "\n\nTitle: " + article_title + "\nContent: " + article_text
+)
+```
+
+#### Bug 2 — Modèle secondaire hors capacité VRAM (bloquant si modèle chargé)
+
+**Cause :** `gemma4:e4b` (9.6 GB sur disque) ne tient pas en VRAM en même temps que `qwen3.5:9b` (7.9 GB VRAM). Total disponible : 15.9 GB, besoin minimum estimé : 17.5+ GB.
+
+**Note AMD ROCm :** sur architecture ROCm (AMD), les modèles quantisés sont dequantisés en FP16 au chargement. Cela explique le ratio disk→VRAM observé : `llama3.2:3b` (2 GB disque → 5.1 GB VRAM, ratio 2.5×). Sous CUDA/NVIDIA, les modèles Q4 s'exécutent directement en Q4.
+
+**Budget VRAM réel :**
+| Modèle | VRAM mesurée |
+|---|---|
+| qwen3.5:9b | 7 933 MiB |
+| llama3.2:3b | 5 109 MiB |
+| nomic-embed-text | 722 MiB |
+| **Total** | **13 764 MiB / 15 922 MiB (86%)** |
+
+**Fix :** remplacement de `gemma4:e4b` par `llama3.2:3b` (2 GB disque, 5.1 GB VRAM) comme LLM secondaire de fact-check.
+
+**Choix justifié :** llama3.2:3b est issu de la famille Llama/Meta — base d'entraînement différente de qwen3.5:9b (Qwen/Alibaba). L'intérêt du double LLM est précisément d'avoir deux perspectives indépendantes. Un modèle plus grand (gemma4) serait préférable mais n'est pas faisable dans ce budget VRAM.
+
+**Résultat après fix :** score_errors/min = 0, scoring reprend normalement.
+
+**Git :** commit `fee0da1`
+
+---
+
+### Architecture dual LLM — précision sur le mécanisme de comparaison
+
+#### Rôle de chaque modèle
+
+- **qwen3.5:9b** : enrichissement (résumé + tags) **ET** fact-check primaire. Un seul modèle, deux usages.
+- **llama3.2:3b** : fact-check secondaire uniquement. **1 seul LLM secondaire**, pas deux.
+
+#### Comparaison positionnelle — heuristique, pas de matching sémantique
+
+Les deux modèles reçoivent le même prompt et produisent chacun une liste de claims. La fusion se fait par index positionnel (claim[0] de qwen vs claim[0] de llama) :
+
+```
+Article sur GPT-5 :
+
+qwen3.5 :                              llama3.2 :
+  [0] "GPT-5 scores 92% on MMLU"        [0] "GPT-5 achieves 92% on MMLU"
+      → supported                            → supported
+  [1] "Surpasses human experts"         [1] "Beats human performance"
+      → unsupported                          → contested
+  [2] "Published by OpenAI"             [2] "OpenAI claims superiority"
+      → supported                            → unsupported
+
+Fusion :
+  [0] supported + supported  → supported  (accord)
+  [1] unsupported + contested → contested  (désaccord → crédit 50%)
+  [2] supported + unsupported → contested  (désaccord → crédit 50%)
+```
+
+**Limite connue :** si les deux modèles extraient des claims différents dans des ordres différents, la comparaison positionnelle est incohérente. La solution correcte serait un matching sémantique par embeddings des claims, mais le coût est prohibitif pour le volume de traitement actuel.
+
+**Valeur réelle du double LLM malgré la limite :**
+1. **Fallback robuste** — si un modèle échoue (timeout réseau, erreur), l'autre prend le relais sans bloquer le pipeline.
+2. **Biais croisés** — l'accord de deux modèles de familles distinctes est un signal plus fort qu'un verdict unique.
+3. **Partial credit** — le statut `contested` (désaccord) donne un crédit intermédiaire (50%) plutôt qu'un verdict binaire.
+
+**Axes d'amélioration future :** matching sémantique des claims entre les deux modèles avant fusion ; ou utiliser un modèle plus grand (gemma4:e4b) si VRAM augmentée.
+
+---
+
+## Session 15 — Page de documentation interne
+
+### Contexte
+
+Le bouton "API docs" dans l'en-tête du site pointait vers `/docs` (Swagger FastAPI automatique). Ce n'est pas suffisant pour comprendre la logique métier du système (formule de score, pipeline, dual LLM, etc.).
+
+### Ce qui a été créé
+
+**`web/src/pages/Docs.tsx`** — page de documentation React complète, accessible à `/documentation`.
+
+**Sections couvertes :**
+
+| Section | Contenu |
+|---|---|
+| Vue d'ensemble | Architecture globale (diagramme), stack technique |
+| Pipeline | États d'un article, distinction cron (collecte) vs thread continu (pipeline), étapes détaillées |
+| Score de confiance | Formule `40×source + 30×corroboration + 20×fact-check + 10×freshness`, tableaux de correspondance pour chaque composante |
+| Fact-check dual LLM | Modèles, mécanisme de comparaison positionnelle, limite connue, règles de fusion par cas, fallback |
+| Corroboration | Algorithme cosinus, cache vectoriel NumPy vectorisé |
+| Cluster dedup | Principe canonique, exemple, contrôle dans le feed |
+| Tags | Règles de normalisation, tableau avant/après, filtre multi-chips |
+| Sources | Types, formats d'URL, fréquences de collecte (cron via APScheduler) |
+| API REST | Endpoints, paramètres de filtrage |
+
+**Navigation :**
+- Lien "Docs" ajouté dans la navbar principale (Feed / Admin / Docs)
+- Table des matières sticky sur la gauche avec highlight de la section active au scroll
+- "Swagger API ↗" discret en haut à droite pour accéder à la doc auto FastAPI
+
+**Points corrigés suite aux retours :**
+- Clarification : 1 seul LLM secondaire (llama3.2:3b), pas deux
+- Pipeline : distinction explicite collecte (CronTrigger) vs enrichissement/scoring (thread `while True`)
+- Explication honnête de la limite du matching positionnel dans le dual LLM
+
+**Git :** commits `70112a4` (création) et `fafb29c` (corrections)
+
+---
+
+## État du projet — juin 2026
+
+### Git log
+```
+fafb29c  docs: fix documentation — 1 secondary LLM, cron vs thread, positional comparison
+70112a4  feat: documentation page with TOC, pipeline, scoring formula, dual LLM, clusters
+fee0da1  fix: dual LLM fact-check — KeyError on prompt + wrong secondary model
+45a6882  docs: DEVLOG session 14 — dual LLM, tag norm, cluster dedup + recalibration proposal
+0477b5c  feat: data quality improvements — dual LLM, tag norm, cluster dedup, tag chips
+edd506e  chore: initial commit — veille-techno v1.0 (sessions 1-13)
+```
+
+### Fonctionnalités en production
+- ✅ Collecte automatique (19 sources, RSS + arXiv + HN)
+- ✅ Pipeline continu : enrichissement (qwen3.5) → embedding (nomic) → scoring → clustering
+- ✅ Dual LLM fact-check (qwen3.5 primaire + llama3.2 secondaire)
+- ✅ Score de confiance 4 composantes (source × corroboration × fact-check × freshness)
+- ✅ Déduplication sémantique par cluster + badge "N similar"
+- ✅ Normalisation des tags (354 nettoyés, synonymes AI)
+- ✅ Feed : recherche full-text + chips tags multi-select + filtres + tri
+- ✅ Admin : monitoring pipeline, sparklines, gestion sources, logs erreurs 24h
+- ✅ Page documentation interne (pipeline, formules, dual LLM, API)
+- ✅ Git avec commits par session
+
+### En attente de validation
+- ⏳ Recalibrage automatique de la reliability des sources (proposition en session 14)
+
+---
+
 *Dernière mise à jour : juin 2026*
