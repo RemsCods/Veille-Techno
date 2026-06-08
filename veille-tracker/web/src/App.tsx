@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Link, NavLink } from "react-router-dom";
 import Feed from "./pages/Feed";
 import ArticleDetail from "./pages/ArticleDetail";
 import Admin from "./pages/Admin";
+import Docs from "./pages/Docs";
 
 export default function App() {
   return (
@@ -28,13 +29,22 @@ export default function App() {
           >
             Admin
           </NavLink>
+          <NavLink
+            to="/documentation"
+            className={({ isActive }) =>
+              `text-sm ${isActive ? "text-gray-100" : "text-gray-500 hover:text-gray-300"}`
+            }
+          >
+            Docs
+          </NavLink>
         </nav>
         <a
           href="/docs"
           target="_blank"
-          className="ml-auto text-sm text-gray-400 hover:text-gray-200"
+          rel="noopener noreferrer"
+          className="ml-auto text-xs text-gray-600 hover:text-gray-400"
         >
-          API docs
+          Swagger API ↗
         </a>
       </header>
       <main className="max-w-5xl mx-auto px-4 py-8">
@@ -42,6 +52,7 @@ export default function App() {
           <Route path="/" element={<Feed />} />
           <Route path="/articles/:id" element={<ArticleDetail />} />
           <Route path="/admin" element={<Admin />} />
+          <Route path="/documentation" element={<Docs />} />
         </Routes>
       </main>
     </BrowserRouter>
