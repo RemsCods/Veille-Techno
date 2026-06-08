@@ -634,4 +634,185 @@ Sources RSS vérifiées et fonctionnelles à ajouter :
 
 Pour Anthropic et Mistral : sources HN ciblées (`?query=anthropic`, `?query=mistral+AI`) fonctionnant après les deux fixes ci-dessus.
 
+---
+
+## Session 14 — Qualité & fiabilité des données
+
+**Objectifs :** améliorer la valeur des données produites par le pipeline (fact-check plus robuste, tags cohérents, déduplication sémantique, filtre par tags côté feed).
+
+### Nouveau checkpoint Git
+
+Dépôt git initialisé à la racine `/root/veille-techno`. Premier commit `edd506e` couvre les sessions 1–13. Chaque session est désormais commitée comme checkpoint de rollback.
+
+```
+git log --oneline
+0477b5c feat: data quality improvements (session 14)
+edd506e chore: initial commit — veille-techno v1.0 (sessions 1-13)
+```
+
+---
+
+### 1. Dual LLM Fact-checking — qwen3.5:9b + gemma4:e4b
+
+**Problème :** le fact-check était réalisé par un seul modèle local (qwen3.5:9b). Il n'a pas accès à Internet et peut halluciner. Son verdict n'a aucune contre-vérification.
+
+**Solution :** exécuter deux modèles en séquence sur le même article, puis fusionner leurs verdicts.
+
+**Modèles choisis :**
+- `qwen3.5:9b` — modèle primaire (déjà utilisé pour l'enrichissement), base de connaissance solide
+- `gemma4:e4b` — modèle secondaire, base de connaissance plus récente (Google), 9.6 GB en VRAM
+
+Les deux tiennent en VRAM simultanément sur le LXC-AI (total ~16 GB).
+
+**Config :**
+```bash
+OLLAMA_FACTCHECK_MODEL=gemma4:e4b  # ajouté dans .env et config.py
+```
+
+**Logique de fusion (par claim) :**
+
+| qwen3.5 | gemma4 | Consensus | Crédit scoring |
+|---------|--------|-----------|----------------|
+| supported | supported | supported | 100% |
+| unsupported | unsupported | unsupported | 0% |
+| unverifiable | quoi que ce soit | unverifiable | exclu du pool |
+| supported | unsupported | **contested** | **50%** |
+| unsupported | supported | **contested** | **50%** |
+
+Le statut `"contested"` est un nouveau statut intermédiaire : les deux modèles ne sont pas d'accord sur un claim. C'est plus honnête que trancher arbitrairement d'un côté.
+
+**Stockage :**
+```sql
+-- Colonnes ajoutées à fact_checks
+fact_check_models  VARCHAR(200)  -- ex : "qwen3.5:9b|gemma4:e4b"
+secondary_status   VARCHAR(20)   -- verdict brut du modèle B (pour transparence)
+-- supporting_sources = consensus : supported | unsupported | unverifiable | contested
+```
+
+**Fichiers modifiés :**
+- `ollama_client.py` : `chat_with_model(prompt, model)` — routing explicite du modèle
+- `confidence.py` : `_run_factcheck_model()`, `_merge_factcheck_claims()`, `score_fact_check()` refactorisé
+- `config.py`, `.env` : `OLLAMA_FACTCHECK_MODEL`
+- `models.py` : colonnes `fact_check_models`, `secondary_status` sur `FactCheck`
+
+---
+
+### 2. Normalisation des tags
+
+**Problème :** le LLM générait des variantes inconsistantes — `"llms"`, `"large language model"`, `"large language models"`, `"LLM"` → 4 tags différents pour la même notion. Les filtres par tag étaient inutiles.
+
+**Solution :** `app/tag_normalizer.py` — appliqué à chaque tag avant insertion.
+
+**Règles :**
+1. Lowercase + trim
+2. Suppression de la ponctuation non-significative (sauf tiret)
+3. Mapping synonymes (~60 entrées) : `"large language models"` → `"llm"`, `"artificial intelligence"` → `"ai"`, `"reinforcement learning"` → `"rl"`, `"fine_tuning"` → `"fine-tuning"`, etc.
+4. Rejet des stopwords : `"the"`, `"new"`, `"research"`, `"article"`, etc.
+5. Rejet des tags trop courts (< 2 chars) ou purement numériques
+
+**Migration des tags existants :**
+- Script `scripts/normalize_existing_tags.py`
+- Utilise pymysql direct avec `autocommit=True` pour éviter les conflits de lock avec le pipeline en cours
+- **Résultat :** 8 463 tags → 231 renommés, 116 fusionnés, 7 supprimés, 0 erreurs
+- Avant : `"artificial intelligence"` (275) + `"ai"` (107) séparés → après : `"ai"` (388)
+- Avant : `"large language models"` (200) seul → après : `"llm"` (309) avec tous les variants fusionnés
+
+**Fichiers :**
+- `app/tag_normalizer.py` (nouveau)
+- `app/workers/enricher.py` : utilise `normalize_tag_list()` avant insertion
+- `app/scripts/normalize_existing_tags.py` (nouveau)
+
+---
+
+### 3. Déduplication sémantique dans le feed
+
+**Problème :** quand 4 sources couvrent le même événement, le feed affiche 4 articles quasi-identiques. Bruit pour l'utilisateur.
+
+**Solution :** système de clustering basé sur les corroborations existantes.
+
+**Schéma :**
+```sql
+ALTER TABLE articles
+  ADD COLUMN canonical_id INT DEFAULT NULL,     -- NULL = article canonique du cluster
+  ADD COLUMN cluster_size INT NOT NULL DEFAULT 1; -- nb d'articles similaires (pour canonique)
+```
+
+**Worker `workers/cluster.py` (nouveau) :**
+- Trouve les articles `status='score'` qui ont des corroborations et `cluster_size = 1`
+- Pour chaque article : collecte tous les IDs du cluster (graphe à profondeur 2)
+- Élit le canonique : article avec le meilleur `confidence_score`
+- Met à jour : non-canoniques → `canonical_id = canonical.id`, canonique → `cluster_size = N`
+- Ajouté au scheduler dans le loop du pipeline continu
+
+**Feed API :**
+- `GET /articles?deduplicate=true` (défaut) → ne montre que les canoniques (`canonical_id IS NULL`)
+- `GET /articles?deduplicate=false` → tout afficher (utile pour debug)
+
+**Frontend :**
+- `ArticleCard` : badge `"N similar"` avec icône lien quand `cluster_size > 1`
+- Checkbox "Show duplicates" dans les filtres du Feed
+
+---
+
+### 4. Filtre multi-tags chips dans le Feed
+
+**Problème :** la seule façon de filtrer par contenu était la barre de recherche (full-text). Pas de navigation thématique rapide.
+
+**Solution :** rangée de chips cliquables au-dessus des filtres, multi-sélection en OR.
+
+**Nouveau endpoint :**
+```
+GET /articles/tags/popular?limit=25
+→ [{"name": "llm", "count": 309}, {"name": "ai", "count": 388}, ...]
+```
+
+**Frontend Feed.tsx :**
+- Chips affichés dynamiquement depuis l'endpoint
+- Clic → toggle dans `activeTags[]`
+- Chip actif = fond indigo, inactif = gris
+- Passe `?tags=llm&tags=transformer` à l'API (OR : article doit avoir AU MOINS un des tags)
+- Compatible avec search + sort + source filter + dédup
+- "Clear filters" réinitialise aussi les tags actifs
+
+---
+
+### Proposition : recalibrage automatique de la reliability (non encore implémenté)
+
+À valider avant implémentation. Voici le mécanisme proposé :
+
+**Principe :** la `reliability` d'une source est fixée manuellement à l'ajout et ne change jamais. Elle devrait évoluer en fonction de la qualité observée des articles de cette source.
+
+**Formule proposée :**
+
+```python
+# Pour chaque source, calculer la "qualité observée" sur les 30 derniers jours
+# Utiliser uniquement les composantes INDÉPENDANTES de la reliability
+# (évite la circularité : reliability → confidence_score → recalibrage → reliability)
+observed_quality = avg_over_scored_articles(
+    0.6 * corroboration_score_component +   # vérifié par d'autres sources
+    0.4 * fact_check_score_component         # vérifié par les LLMs
+)
+
+# EMA (exponential moving average) — changement lent
+new_reliability = round(old_reliability * 0.80 + observed_quality * 0.20)
+
+# Garde-fous
+new_reliability = max(10, min(95, new_reliability))   # plafond/plancher
+delta = new_reliability - old_reliability
+if abs(delta) > 8:                                     # max ±8 par run
+    new_reliability = old_reliability + (8 if delta > 0 else -8)
+```
+
+**Conditions de déclenchement :**
+- Cron hebdo (lundi 3h00)
+- Minimum 10 articles scorés dans les 30 derniers jours (en dessous : pas assez de données)
+
+**Traçabilité :** nouvelle table `source_calibrations(id, source_id, calibrated_at, old_reliability, new_reliability, article_count, avg_corr, avg_fact)`.
+
+**Risque :** une source fiable qui publie un pic d'articles sensationnalistes ponctuellement pourrait être pénalisée. Le coefficient 0.80/0.20 (EMA lente) et le cap ±8 limitent cet effet.
+
+→ **Valide ce mécanisme avant qu'on l'implémente.**
+
+---
+
 *Dernière mise à jour : juin 2026*
