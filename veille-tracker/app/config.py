@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     ollama_host: str = "http://localhost:11434"
     ollama_chat_model: str = "qwen3.5:9b"
-    ollama_factcheck_model: str = "gemma4:e4b"   # second model for dual fact-check
+    ollama_factcheck_model: str = "llama3.2:3b"   # second model for dual fact-check (must fit in remaining VRAM alongside chat_model)
     ollama_embed_model: str = "nomic-embed-text"
 
     rss_collect_interval: str = "*/30 * * * *"

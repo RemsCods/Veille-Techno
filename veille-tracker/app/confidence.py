@@ -103,25 +103,24 @@ def score_corroboration(article: Article, db: Session) -> float:
     return 100.0
 
 
-_FACTCHECK_PROMPT_TEMPLATE = (
-    "Analyze this article and extract 3-5 key factual claims. "
-    "Classify each as:\n"
-    "- 'supported': stated fact with explicit attribution, or widely established knowledge\n"
-    "- 'unsupported': assertion made without evidence or attribution\n"
-    "- 'unverifiable': opinion, prediction, or speculation\n"
-    "Return ONLY valid JSON: "
-    '{"claims": [{"text": "...", "status": "supported|unsupported|unverifiable"}]}\n\n'
-    "Title: {title}\nContent: {text}"
-)
-
-
-def _run_factcheck_model(title: str, text: str, model: str) -> list[dict]:
+def _run_factcheck_model(article_title: str, article_text: str, model: str) -> list[dict]:
     """
     Ask one model to extract and classify factual claims.
     Returns list of {text, status} dicts, or [] on failure.
+
+    NOTE: prompt is built with explicit string concatenation (NOT .format() or f-string on
+    a template with braces) to avoid KeyError when article content contains literal {}.
     """
-    prompt = _FACTCHECK_PROMPT_TEMPLATE.format(title=title, text=text)
     try:
+        prompt = (
+            "Analyze this article and extract 3-5 key factual claims. "
+            "Classify each as:\n"
+            "- 'supported': stated fact with explicit attribution, or widely established knowledge\n"
+            "- 'unsupported': assertion made without evidence or attribution\n"
+            "- 'unverifiable': opinion, prediction, or speculation\n"
+            'Return ONLY valid JSON: {"claims": [{"text": "...", "status": "supported|unsupported|unverifiable"}]}'
+            "\n\nTitle: " + article_title + "\nContent: " + article_text
+        )
         raw = chat_with_model(prompt, model)
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         data = json.loads(match.group()) if match else {}
@@ -218,7 +217,7 @@ def score_fact_check(article: Article, db: Session) -> float:
     model_b = settings.ollama_factcheck_model  # gemma4:e4b
 
     claims_a = _run_factcheck_model(article.title, text, model_a)
-    claims_b = _run_factcheck_model(article.title, text, model_b)
+    claims_b = _run_factcheck_model(article.title, text, model_b)  # llama3.2:3b — fits in remaining VRAM
 
     merged = _merge_factcheck_claims(claims_a, model_a, claims_b, model_b)
 
