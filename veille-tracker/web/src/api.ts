@@ -25,8 +25,17 @@ async function req<T>(
   return res.json();
 }
 
-export const fetchArticles = (params: URLSearchParams) =>
-  get<import("./types").Article[]>(`/articles?${params}`);
+export const fetchArticles = (
+  params: URLSearchParams,
+  tags: string[] = [],
+  deduplicate = true,
+) => {
+  // Clone so we don't mutate the caller's params
+  const p = new URLSearchParams(params);
+  tags.forEach((t) => p.append("tags", t));
+  if (!deduplicate) p.set("deduplicate", "false");
+  return get<import("./types").Article[]>(`/articles?${p}`);
+};
 
 export const fetchArticle = (id: string) =>
   get<import("./types").ArticleDetail>(`/articles/${id}`);

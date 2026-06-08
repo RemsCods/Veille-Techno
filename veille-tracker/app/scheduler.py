@@ -59,25 +59,28 @@ def _continuous_pipeline() -> None:
     from workers.enricher import run_enricher
     from workers.scorer import run_scorer
     from workers.embed_missing import run_embed_missing
+    from workers.cluster import run_cluster
 
-    pool = ThreadPoolExecutor(max_workers=7, thread_name_prefix="pipeline")
+    pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pipeline")
 
     while not _pipeline_stop.is_set():
         try:
-            f_e1 = pool.submit(run_enricher,     _ENRICHER_BATCH)
-            f_e2 = pool.submit(run_enricher,     _ENRICHER_BATCH)
-            f_e3 = pool.submit(run_enricher,     _ENRICHER_BATCH)
-            f_s1 = pool.submit(run_scorer,       _SCORER_BATCH)
-            f_s2 = pool.submit(run_scorer,       _SCORER_BATCH)
-            f_s3 = pool.submit(run_scorer,       _SCORER_BATCH)
-            f_em = pool.submit(run_embed_missing, 30)
+            f_e1 = pool.submit(run_enricher,      _ENRICHER_BATCH)
+            f_e2 = pool.submit(run_enricher,      _ENRICHER_BATCH)
+            f_e3 = pool.submit(run_enricher,      _ENRICHER_BATCH)
+            f_s1 = pool.submit(run_scorer,        _SCORER_BATCH)
+            f_s2 = pool.submit(run_scorer,        _SCORER_BATCH)
+            f_s3 = pool.submit(run_scorer,        _SCORER_BATCH)
+            f_em = pool.submit(run_embed_missing,  30)
+            f_cl = pool.submit(run_cluster,       100)  # cluster after scoring
 
-            futures_wait([f_e1, f_e2, f_e3, f_s1, f_s2, f_s3, f_em])
-            n_enriched = f_e1.result() + f_e2.result() + f_e3.result()
-            n_scored   = f_s1.result() + f_s2.result() + f_s3.result()
-            n_embedded = f_em.result()
+            futures_wait([f_e1, f_e2, f_e3, f_s1, f_s2, f_s3, f_em, f_cl])
+            n_enriched  = f_e1.result() + f_e2.result() + f_e3.result()
+            n_scored    = f_s1.result() + f_s2.result() + f_s3.result()
+            n_embedded  = f_em.result()
+            n_clustered = f_cl.result()
 
-            if n_enriched == 0 and n_scored == 0 and n_embedded == 0:
+            if n_enriched == 0 and n_scored == 0 and n_embedded == 0 and n_clustered == 0:
                 _pipeline_stop.wait(timeout=15)
         except Exception:
             _pipeline_stop.wait(timeout=10)

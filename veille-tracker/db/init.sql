@@ -27,9 +27,12 @@ CREATE TABLE IF NOT EXISTS articles (
   collected_at     DATETIME NOT NULL DEFAULT NOW(),
   confidence_score FLOAT,
   status           ENUM('collecte','processing','enrichi','score') NOT NULL DEFAULT 'collecte',
+  canonical_id     INT DEFAULT NULL,          -- NULL = canonical article (or not yet clustered)
+  cluster_size     INT NOT NULL DEFAULT 1,    -- number of similar articles from other sources
   FOREIGN KEY (source_id) REFERENCES sources(id),
-  INDEX idx_status (status),
-  INDEX idx_score  (confidence_score)
+  INDEX idx_status    (status),
+  INDEX idx_score     (confidence_score),
+  INDEX idx_canonical (canonical_id)
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -67,7 +70,9 @@ CREATE TABLE IF NOT EXISTS fact_checks (
   article_id         INT NOT NULL,
   claim              TEXT NOT NULL,
   verifiable         BOOLEAN,
-  supporting_sources TEXT,
+  supporting_sources TEXT,          -- consensus status: supported|unsupported|unverifiable|contested
+  fact_check_models  VARCHAR(200),  -- e.g. "qwen3.5:9b|gemma4:e4b"
+  secondary_status   VARCHAR(20),   -- secondary model's raw verdict (for transparency)
   FOREIGN KEY (article_id) REFERENCES articles(id)
 );
 

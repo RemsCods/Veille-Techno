@@ -8,7 +8,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 from config import settings
 from models import Article, Embedding, Corroboration, FactCheck
-from ollama_client import chat, bytes_to_vector
+from ollama_client import chat, chat_with_model, bytes_to_vector
 
 # ── In-memory embedding cache ─────────────────────────────────────────────────
 # Shared across all scorer threads. Refreshed every 30 s.
@@ -103,7 +103,110 @@ def score_corroboration(article: Article, db: Session) -> float:
     return 100.0
 
 
+_FACTCHECK_PROMPT_TEMPLATE = (
+    "Analyze this article and extract 3-5 key factual claims. "
+    "Classify each as:\n"
+    "- 'supported': stated fact with explicit attribution, or widely established knowledge\n"
+    "- 'unsupported': assertion made without evidence or attribution\n"
+    "- 'unverifiable': opinion, prediction, or speculation\n"
+    "Return ONLY valid JSON: "
+    '{"claims": [{"text": "...", "status": "supported|unsupported|unverifiable"}]}\n\n'
+    "Title: {title}\nContent: {text}"
+)
+
+
+def _run_factcheck_model(title: str, text: str, model: str) -> list[dict]:
+    """
+    Ask one model to extract and classify factual claims.
+    Returns list of {text, status} dicts, or [] on failure.
+    """
+    prompt = _FACTCHECK_PROMPT_TEMPLATE.format(title=title, text=text)
+    try:
+        raw = chat_with_model(prompt, model)
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        data = json.loads(match.group()) if match else {}
+        return data.get("claims", [])
+    except Exception:
+        return []
+
+
+def _merge_factcheck_claims(
+    claims_a: list[dict], model_a: str,
+    claims_b: list[dict], model_b: str,
+) -> list[dict]:
+    """
+    Merge results from two models.
+
+    Consensus rules (per claim, matched by index):
+    - Both agree → use that status (high confidence)
+    - One says 'supported', other says 'unsupported' → 'contested' (sharp disagreement)
+    - One says 'unverifiable', other says anything → 'unverifiable' (conservative)
+    - Only one model returned results → use its result with no secondary_status
+
+    Returns list of {text, status, secondary_status, models} dicts.
+    """
+    model_label = f"{model_a}|{model_b}"
+
+    if not claims_a and not claims_b:
+        return []
+
+    # Only one model worked
+    if not claims_b:
+        return [
+            {"text": c.get("text", ""), "status": c.get("status", "unverifiable"),
+             "secondary_status": None, "models": model_a}
+            for c in claims_a
+        ]
+    if not claims_a:
+        return [
+            {"text": c.get("text", ""), "status": c.get("status", "unverifiable"),
+             "secondary_status": None, "models": model_b}
+            for c in claims_b
+        ]
+
+    # Both models returned results — merge by index (best we can do without semantic matching)
+    merged = []
+    for i, ca in enumerate(claims_a):
+        status_a = ca.get("status", "unverifiable")
+        cb = claims_b[i] if i < len(claims_b) else None
+        status_b = cb.get("status") if cb else None
+
+        if status_b is None:
+            consensus = status_a
+            secondary = None
+        elif status_a == status_b:
+            consensus = status_a
+            secondary = status_b
+        elif {"supported", "unsupported"} == {status_a, status_b}:
+            # Sharp disagreement: one says supported, other says unsupported
+            consensus = "contested"
+            secondary = status_b
+        else:
+            # Mixed with unverifiable → conservative
+            consensus = "unverifiable"
+            secondary = status_b
+
+        merged.append({
+            "text":             ca.get("text", ""),
+            "status":           consensus,
+            "secondary_status": secondary,
+            "models":           model_label,
+        })
+    return merged
+
+
 def score_fact_check(article: Article, db: Session) -> float:
+    """
+    Dual-model fact-checking: runs qwen3.5 + gemma4:e4b in sequence.
+
+    Scoring:
+    - 'supported' (consensus)  → full credit
+    - 'contested' (disagreement) → half credit (one model said supported)
+    - 'unsupported'             → no credit
+    - 'unverifiable'            → excluded from verifiable pool
+
+    Falls back gracefully if either model is unavailable.
+    """
     # Idempotent: clean up previous run before inserting fresh results
     db.query(FactCheck).filter(FactCheck.article_id == article.id).delete()
 
@@ -111,41 +214,37 @@ def score_fact_check(article: Article, db: Session) -> float:
     if not text.strip():
         return 60.0
 
-    prompt = (
-        "Analyze this article and extract 3-5 key factual claims. "
-        "Classify each as:\n"
-        "- 'supported': stated fact with explicit attribution, or widely established knowledge\n"
-        "- 'unsupported': assertion made without evidence or attribution\n"
-        "- 'unverifiable': opinion, prediction, or speculation\n"
-        "Return ONLY valid JSON: "
-        "{\"claims\": [{\"text\": \"...\", \"status\": \"supported|unsupported|unverifiable\"}]}\n\n"
-        f"Title: {article.title}\nContent: {text}"
-    )
-    try:
-        raw = chat(prompt)
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        data = json.loads(match.group()) if match else {}
-        claims = data.get("claims", [])
-    except Exception:
-        return 60.0
+    model_a = settings.ollama_chat_model       # qwen3.5:9b
+    model_b = settings.ollama_factcheck_model  # gemma4:e4b
 
-    for c in claims:
+    claims_a = _run_factcheck_model(article.title, text, model_a)
+    claims_b = _run_factcheck_model(article.title, text, model_b)
+
+    merged = _merge_factcheck_claims(claims_a, model_a, claims_b, model_b)
+
+    for c in merged:
         db.add(FactCheck(
             article_id=article.id,
-            claim=c.get("text", ""),
-            verifiable=c.get("status") != "unverifiable",
-            supporting_sources=c.get("status"),
+            claim=c["text"],
+            verifiable=c["status"] != "unverifiable",
+            supporting_sources=c["status"],
+            fact_check_models=c["models"],
+            secondary_status=c["secondary_status"],
         ))
     db.commit()
 
-    if not claims:
+    if not merged:
         return 60.0
 
-    verifiable = [c for c in claims if c.get("status") != "unverifiable"]
+    verifiable = [c for c in merged if c["status"] != "unverifiable"]
     if not verifiable:
         return 65.0
-    supported = sum(1 for c in verifiable if c.get("status") == "supported")
-    return max(round(supported / len(verifiable) * 100, 1), 35.0)
+
+    # Scoring with partial credit for contested claims
+    supported  = sum(1 for c in verifiable if c["status"] == "supported")
+    contested  = sum(1 for c in verifiable if c["status"] == "contested")
+    effective  = supported + contested * 0.5   # half credit when models disagree
+    return max(round(effective / len(verifiable) * 100, 1), 35.0)
 
 
 def score_freshness(article: Article) -> float:

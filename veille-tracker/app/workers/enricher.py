@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Article, Tag
 from ollama_client import chat
+from tag_normalizer import normalize_tag_list
 
 SYSTEM_SUMMARISE = (
     "You are a technical assistant. Summarise the article in 3-4 sentences, "
@@ -28,10 +29,7 @@ def enrich_article(article: Article, db: Session) -> None:
         article.summary = (article.content or "")[:300]
         tag_names = []
 
-    for name in tag_names[:5]:
-        name = name.strip().lower()
-        if not name:
-            continue
+    for name in normalize_tag_list(tag_names[:8]):   # normalize before storing
         tag = db.query(Tag).filter(Tag.name == name).first()
         if not tag:
             tag = Tag(name=name)

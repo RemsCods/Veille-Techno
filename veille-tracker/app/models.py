@@ -66,6 +66,9 @@ class Article(Base):
         nullable=False,
         default="collecte",
     )
+    # Semantic deduplication — NULL = canonical (or not yet clustered)
+    canonical_id     = Column(Integer, ForeignKey("articles.id", ondelete="SET NULL"), nullable=True)
+    cluster_size     = Column(Integer, nullable=False, default=1)
 
     source       = relationship("Source", back_populates="articles")
     tags         = relationship("Tag", secondary="articles_tags", back_populates="articles")
@@ -106,7 +109,9 @@ class FactCheck(Base):
     article_id         = Column(Integer, ForeignKey("articles.id"), nullable=False)
     claim              = Column(Text, nullable=False)
     verifiable         = Column(Boolean)
-    supporting_sources = Column(Text)
+    supporting_sources = Column(Text)     # consensus status: supported|unsupported|unverifiable|contested
+    fact_check_models  = Column(String(200))  # e.g. "qwen3.5:9b|gemma4:e4b"
+    secondary_status   = Column(String(20))   # raw verdict from model B (for transparency)
 
     article = relationship("Article", back_populates="fact_checks")
 

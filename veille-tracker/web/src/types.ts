@@ -15,6 +15,7 @@ export interface Article {
   confidence_score: number | null;
   status: string;
   tags: Tag[];
+  cluster_size: number;  // >1 = canonical with N-1 similar articles from other sources
 }
 
 export interface FactCheck {

@@ -46,6 +46,22 @@ export default function ArticleCard({ article }: Props) {
             {t.name}
           </span>
         ))}
+
+        {/* Cluster badge — shown when multiple sources covered the same story */}
+        {article.cluster_size > 1 && (
+          <span
+            className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-950 border border-indigo-800 text-indigo-400"
+            title={`${article.cluster_size - 1} other source${article.cluster_size > 2 ? "s" : ""} covered this story`}
+          >
+            <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <circle cx="4"  cy="8" r="2.5"/>
+              <circle cx="12" cy="8" r="2.5"/>
+              <path d="M6.5 8h3"/>
+            </svg>
+            {article.cluster_size - 1} similar
+          </span>
+        )}
+
         <a
           href={article.url}
           target="_blank"

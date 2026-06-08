@@ -3,41 +3,48 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchArticles, fetchSources, fetchStats, collectAll } from "../api";
 import ArticleCard from "../components/ArticleCard";
 
+const BASE = "/api";
+
+interface TagCount { name: string; count: number }
+
+function fetchPopularTags(): Promise<TagCount[]> {
+  return fetch(`${BASE}/articles/tags/popular?limit=25`).then((r) => r.json());
+}
+
 export default function Feed() {
-  const [minScore, setMinScore] = useState("");
+  const [minScore, setMinScore]       = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
-  const [sort, setSort] = useState("collected_at:desc");
-  const [page, setPage] = useState(0);
-  const [collectMsg, setCollectMsg] = useState<string | null>(null);
+  const [sort, setSort]               = useState("collected_at:desc");
+  const [page, setPage]               = useState(0);
+  const [collectMsg, setCollectMsg]   = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState(""); // debounced value
+  const [search, setSearch]           = useState("");
+  const [activeTags, setActiveTags]   = useState<string[]>([]);
+  const [showDupes, setShowDupes]     = useState(false);
   const limit = 20;
 
   const queryClient = useQueryClient();
 
-  // Debounce search — wait 350ms after last keystroke before querying
+  // Debounce search
   useEffect(() => {
-    const t = setTimeout(() => {
-      setSearch(searchInput);
-      setPage(0);
-    }, 350);
+    const t = setTimeout(() => { setSearch(searchInput); setPage(0); }, 350);
     return () => clearTimeout(t);
   }, [searchInput]);
 
   const [sortBy, sortDir] = sort.split(":") as [string, string];
 
   const params = new URLSearchParams();
-  if (search) params.set("search", search);
-  if (minScore) params.set("min_score", minScore);
-  if (sourceFilter) params.set("source", sourceFilter);
-  params.set("sort_by", sortBy);
+  if (search)       params.set("search",     search);
+  if (minScore)     params.set("min_score",  minScore);
+  if (sourceFilter) params.set("source",     sourceFilter);
+  params.set("sort_by",  sortBy);
   params.set("sort_dir", sortDir);
-  params.set("limit", String(limit));
-  params.set("offset", String(page * limit));
+  params.set("limit",    String(limit));
+  params.set("offset",   String(page * limit));
 
   const { data: articles = [], isLoading, isError } = useQuery({
-    queryKey: ["articles", params.toString()],
-    queryFn: () => fetchArticles(params),
+    queryKey: ["articles", params.toString(), activeTags, showDupes],
+    queryFn: () => fetchArticles(params, activeTags, !showDupes),
     refetchInterval: 15_000,
   });
 
@@ -52,10 +59,16 @@ export default function Feed() {
     refetchInterval: 15_000,
   });
 
+  const { data: popularTags = [] } = useQuery({
+    queryKey: ["popularTags"],
+    queryFn: fetchPopularTags,
+    staleTime: 60_000,
+  });
+
   const collectMutation = useMutation({
     mutationFn: collectAll,
     onSuccess: (data) => {
-      setCollectMsg(`Collection started for ${data.sources_count} sources. Articles will appear in a few minutes.`);
+      setCollectMsg(`Collection started for ${data.sources_count} sources.`);
       setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ["articles"] });
         queryClient.invalidateQueries({ queryKey: ["stats"] });
@@ -64,14 +77,34 @@ export default function Feed() {
     },
   });
 
+  function clearFilters() {
+    setSearchInput(""); setSearch("");
+    setMinScore(""); setSourceFilter("");
+    setSort("collected_at:desc");
+    setActiveTags([]);
+    setShowDupes(false);
+    setPage(0);
+  }
+
+  const hasActiveFilters =
+    search || minScore || sourceFilter ||
+    sort !== "collected_at:desc" || activeTags.length > 0 || showDupes;
+
+  function toggleTag(name: string) {
+    setPage(0);
+    setActiveTags((prev) =>
+      prev.includes(name) ? prev.filter((t) => t !== name) : [...prev, name]
+    );
+  }
+
   return (
     <div>
       {stats && (
         <div className="grid grid-cols-3 gap-4 mb-6">
           {[
             { label: "Total articles", value: stats.total_articles },
-            { label: "Reliable", value: `${stats.pct_reliable}%` },
-            { label: "Avg score", value: stats.avg_score ?? "—" },
+            { label: "Reliable",       value: `${stats.pct_reliable}%` },
+            { label: "Avg score",      value: stats.avg_score ?? "—" },
           ].map(({ label, value }) => (
             <div key={label} className="bg-gray-900 border border-gray-800 rounded-lg p-4 text-center">
               <div className="text-2xl font-bold text-indigo-300">{value}</div>
@@ -103,6 +136,29 @@ export default function Feed() {
           </button>
         )}
       </div>
+
+      {/* Tag chips */}
+      {popularTags.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {popularTags.map((t) => {
+            const active = activeTags.includes(t.name);
+            return (
+              <button
+                key={t.name}
+                onClick={() => toggleTag(t.name)}
+                className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors ${
+                  active
+                    ? "bg-indigo-600 text-white"
+                    : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                }`}
+              >
+                {t.name}
+                <span className="ml-1 opacity-60">{t.count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Filters row */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
@@ -137,13 +193,20 @@ export default function Feed() {
           <option value="corroborations:desc">Most corroborated</option>
         </select>
 
-        {(search || minScore || sourceFilter || sort !== "collected_at:desc") && (
+        {/* Dedup toggle */}
+        <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showDupes}
+            onChange={(e) => { setShowDupes(e.target.checked); setPage(0); }}
+            className="w-3.5 h-3.5 accent-indigo-500"
+          />
+          Show duplicates
+        </label>
+
+        {hasActiveFilters && (
           <button
-            onClick={() => {
-              setSearchInput(""); setSearch("");
-              setMinScore(""); setSourceFilter("");
-              setSort("collected_at:desc"); setPage(0);
-            }}
+            onClick={clearFilters}
             className="text-sm text-gray-500 hover:text-gray-300"
           >
             Clear filters
@@ -172,16 +235,21 @@ export default function Feed() {
         </div>
       )}
 
-      {search && !isLoading && (
+      {(search || activeTags.length > 0) && !isLoading && (
         <p className="text-sm text-gray-500 mb-3">
-          {articles.length === 0
-            ? `No results for "${search}"`
-            : `${articles.length}${articles.length === limit ? "+" : ""} result${articles.length !== 1 ? "s" : ""} for "${search}"`}
+          {articles.length === 0 ? (
+            <>No results{search ? ` for "${search}"` : ""}{activeTags.length > 0 ? ` with tags: ${activeTags.join(", ")}` : ""}</>
+          ) : (
+            <>{articles.length}{articles.length === limit ? "+" : ""} result{articles.length !== 1 ? "s" : ""}
+              {search ? ` for "${search}"` : ""}
+              {activeTags.length > 0 ? ` · tags: ${activeTags.join(", ")}` : ""}
+            </>
+          )}
         </p>
       )}
 
       {isLoading && <p className="text-gray-500">Loading…</p>}
-      {isError && <p className="text-red-400">Failed to load articles.</p>}
+      {isError   && <p className="text-red-400">Failed to load articles.</p>}
 
       <div className="space-y-3">
         {articles.map((a) => <ArticleCard key={a.id} article={a} />)}

@@ -5,6 +5,17 @@ from config import settings
 
 
 def chat(prompt: str, system: Optional[str] = None) -> str:
+    """Chat with the default chat model (qwen3.5)."""
+    return chat_with_model(prompt, settings.ollama_chat_model, system)
+
+
+def chat_with_model(
+    prompt: str,
+    model: str,
+    system: Optional[str] = None,
+    max_tokens: int = 512,
+) -> str:
+    """Chat with an explicit Ollama model. Used for dual-model fact-checking."""
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -13,15 +24,15 @@ def chat(prompt: str, system: Optional[str] = None) -> str:
     resp = httpx.post(
         f"{settings.ollama_host}/api/chat",
         json={
-            "model": settings.ollama_chat_model,
+            "model": model,
             "messages": messages,
             "stream": False,
-            "think": False,        # disable Qwen3 thinking mode (CoT tokens = 2min overhead)
+            "think": False,        # disable thinking/CoT mode if supported
             "options": {
-                "num_predict": 512,  # cap output tokens — summary+tags fit in 512
+                "num_predict": max_tokens,
             },
         },
-        timeout=60,
+        timeout=90,   # gemma4 may take slightly longer to load on first call
     )
     resp.raise_for_status()
     return resp.json()["message"]["content"]

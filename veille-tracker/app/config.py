@@ -9,7 +9,8 @@ class Settings(BaseSettings):
     db_password: str = "changeme"
 
     ollama_host: str = "http://localhost:11434"
-    ollama_chat_model: str = "llama3.1:8b"
+    ollama_chat_model: str = "qwen3.5:9b"
+    ollama_factcheck_model: str = "gemma4:e4b"   # second model for dual fact-check
     ollama_embed_model: str = "nomic-embed-text"
 
     rss_collect_interval: str = "*/30 * * * *"

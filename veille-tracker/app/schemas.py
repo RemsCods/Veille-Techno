@@ -65,6 +65,7 @@ class ArticleOut(BaseModel):
     confidence_score: Optional[float] = None
     status: str
     tags: list[TagOut] = []
+    cluster_size: int = 1    # >1 means this article is a cluster canonical with duplicates
 
     model_config = {"from_attributes": True}
 
