@@ -76,6 +76,7 @@ function Badge({ color, children }: { color: string; children: React.ReactNode }
 const TOC = [
   { id: "overview",       label: "Vue d'ensemble" },
   { id: "pipeline",       label: "Pipeline de traitement" },
+  { id: "relevance",      label: "Pertinence & filtrage" },
   { id: "score",          label: "Score de confiance" },
   { id: "factcheck",      label: "Double vérification LLM" },
   { id: "corroboration",  label: "Corroboration sémantique" },
@@ -84,6 +85,16 @@ const TOC = [
   { id: "sources",        label: "Sources & collecte" },
   { id: "api",            label: "API REST" },
 ];
+
+/** Plain-language one-liner shown at the top of a section. */
+function Tldr({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex gap-2 items-start bg-indigo-950/40 border border-indigo-900/50 rounded-lg px-4 py-3 mb-5">
+      <span className="text-indigo-400 text-sm">💡</span>
+      <p className="text-sm text-indigo-200/90 leading-relaxed m-0">{children}</p>
+    </div>
+  );
+}
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
@@ -154,13 +165,43 @@ export default function Docs() {
           </p>
         </div>
 
+        {/* ── Quick summary for newcomers ── */}
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 mb-12">
+          <h2 className="text-sm font-semibold text-indigo-300 uppercase tracking-wide mb-3">
+            ⚡ Le système en 30 secondes
+          </h2>
+          <div className="text-sm text-gray-300 leading-relaxed space-y-2">
+            <p>
+              Ce site surveille automatiquement <strong>l'actualité IA/LLM</strong> depuis ~17 sources
+              (arXiv, blogs officiels, Hacker News, Reddit…). Chaque article collecté est évalué sur
+              <strong> deux axes indépendants</strong> :
+            </p>
+            <ul className="list-none space-y-1.5 pl-1">
+              <li>
+                🎯 <strong className="text-gray-200">La pertinence</strong> — est-ce dans notre sujet de
+                veille ? Un filtre par embeddings élimine le spam <em>avant</em> tout traitement coûteux,
+                un LLM confirme, et vos votes 👍/👎 affinent le système en continu.
+              </li>
+              <li>
+                🛡️ <strong className="text-gray-200">La confiance</strong> — peut-on s'y fier ? Fiabilité
+                de la source + corroboration entre sources indépendantes + double fact-check LLM + fraîcheur.
+              </li>
+            </ul>
+            <p className="text-gray-400">
+              Idée clé du projet : <em>« la présence d'une information en plusieurs endroits ne prouve pas
+              sa fiabilité »</em> — et son pendant : <em>un article fiable n'est pas forcément pertinent,
+              ni l'inverse</em>. D'où deux scores séparés, jamais fusionnés.
+            </p>
+          </div>
+        </div>
+
         {/* ── 1. Vue d'ensemble ── */}
         <Section id="overview" title="Vue d'ensemble">
           <P>
             Le système est une plateforme de veille technologique sur l'IA et les LLM. Il collecte
             automatiquement des articles depuis des sources hétérogènes (RSS, arXiv, Hacker News),
-            les enrichit via des modèles de langage locaux, calcule un score de confiance et les
-            présente dans un feed filtrable.
+            les filtre par pertinence, les enrichit via des modèles de langage locaux, calcule un
+            score de confiance et les présente dans un feed filtrable.
           </P>
 
           <Sub title="Architecture globale">
@@ -211,12 +252,20 @@ export default function Docs() {
             <Table
               headers={["Status", "Signification", "Transition suivante"]}
               rows={[
-                [<Badge color="bg-gray-800 text-gray-300">collecte</Badge>,    "Vient d'être collecté, brut",           "Enricher le prend en charge"],
-                [<Badge color="bg-yellow-900/40 text-yellow-300">processing</Badge>, "En cours d'enrichissement",       "→ enrichi si succès, retour à collecte si échec"],
-                [<Badge color="bg-blue-900/40 text-blue-300">enrichi</Badge>,  "Résumé + tags générés, vecteur généré", "Scorer le prend en charge"],
-                [<Badge color="bg-green-900/40 text-green-300">score</Badge>,  "Score de confiance calculé, visible",   "État final — réaffiché dans le feed"],
+                [<Badge color="bg-gray-800 text-gray-300">collecte</Badge>,    "Vient d'être collecté, brut",                  "Le gate de pertinence le prend en charge"],
+                [<Badge color="bg-purple-900/40 text-purple-300">pertinent</Badge>, "A passé le gate (embedding + ancres)",     "L'enricher le prend en charge"],
+                [<Badge color="bg-yellow-900/40 text-yellow-300">processing</Badge>, "En cours d'enrichissement",               "→ enrichi si succès, retour à pertinent si échec"],
+                [<Badge color="bg-blue-900/40 text-blue-300">enrichi</Badge>,  "Résumé + tags + verdict pertinence LLM",        "Le scorer le prend en charge"],
+                [<Badge color="bg-green-900/40 text-green-300">score</Badge>,  "Score de confiance calculé, visible",           "État final — affiché dans le feed"],
+                [<Badge color="bg-red-900/40 text-red-300">hors_sujet</Badge>, "Écarté par le gate ou le LLM (spam, hors veille)", "État final — conservé en base, masqué du feed"],
               ]}
             />
+            <P>
+              Les articles <Badge color="bg-red-900/40 text-red-300">hors_sujet</Badge> ne sont
+              <strong className="text-gray-300"> jamais supprimés</strong> : principe de veille — rater une
+              information importante (faux négatif) coûte plus cher que tolérer du bruit. Ils restent
+              auditables via la case "Show off-topic" du feed, et un 👍 les réintègre.
+            </P>
           </Sub>
 
           <Sub title="Étape 1 — Collecte">
@@ -259,7 +308,7 @@ export default function Docs() {
             </P>
             <Code>{`# Logique du pipeline continu (scheduler.py)
 while True:
-    lancer en parallèle : enricher×3 + scorer×3 + embedder×1 + cluster×1
+    lancer en parallèle : gate×1 + enricher×3 + scorer×3 + embedder×1 + cluster×1
     attendre que tous les workers terminent
     si rien à traiter → dormir 15 secondes
     sinon             → cycle suivant immédiatement
@@ -268,29 +317,34 @@ while True:
 → Aucune latence d'attente de tick cron pour le pipeline.`}</Code>
           </Sub>
 
-          <Sub title="Étape 2 — Enrichissement (qwen3.5:9b, 3 workers en parallèle)">
+          <Sub title="Étape 2 — Gate de pertinence (nomic-embed-text, aucun LLM)">
             <P>
-              Le worker réclame un lot d'articles atomiquement (passage <code className="text-indigo-300 bg-gray-900 px-1 rounded">collecte → processing</code>)
-              puis appelle qwen3.5:9b pour chaque article. Le prompt demande au modèle de produire
-              un résumé de 3-4 phrases et d'extraire 3-5 tags pertinents.
+              Premier filtre après la collecte : l'article est vectorisé (titre + début du contenu)
+              et comparé aux <strong className="text-gray-300">ancres thématiques</strong> du périmètre
+              de veille. Le spam évident part en <Badge color="bg-red-900/40 text-red-300">hors_sujet</Badge> ici,
+              <strong className="text-gray-300"> avant</strong> de consommer les 3 appels LLM
+              (1 enrichissement + 2 fact-check). Détail complet dans la section{" "}
+              <a href="#relevance" className="text-indigo-400 hover:text-indigo-300">Pertinence & filtrage</a>.
+              L'embedding produit ici est réutilisé ensuite pour la corroboration.
             </P>
-            <Code>{`Prompt enrichissement :
-"You are a technical assistant. Summarise the article in 3-4 sentences,
-then extract 3-5 relevant tags as a JSON list.
-Reply with JSON: {"summary": "...", "tags": ["tag1", ...]}"
-
-→ Le résumé est stocké dans articles.summary
-→ Les tags sont normalisés (voir section Tags) puis stockés dans la table tags`}</Code>
           </Sub>
 
-          <Sub title="Étape 3 — Embedding (nomic-embed-text, 768 dimensions)">
+          <Sub title="Étape 3 — Enrichissement (qwen3.5:9b, 3 workers en parallèle)">
             <P>
-              Un worker séparé génère les vecteurs d'embedding pour tous les articles enrichis
-              qui n'en ont pas encore. Le texte vectorisé est
-              <code className="text-indigo-300 bg-gray-900 px-1 rounded"> titre + résumé</code>.
-              Les vecteurs sont stockés en binaire (LONGBLOB, format float32 × 768) dans la table
-              <code className="text-indigo-300 bg-gray-900 px-1 rounded"> embeddings</code>.
+              Le worker réclame un lot d'articles atomiquement (passage <code className="text-indigo-300 bg-gray-900 px-1 rounded">pertinent → processing</code>)
+              puis appelle qwen3.5:9b pour chaque article. Le prompt v2 demande résumé, tags
+              <strong className="text-gray-300"> et verdict de pertinence</strong> — le deuxième signal
+              de pertinence, sans appel LLM supplémentaire.
             </P>
+            <Code>{`Prompt enrichissement (v2) :
+"You are a technical assistant for a technology watch on AI/ML/LLMs.
+Reply ONLY with JSON:
+{"summary": "...", "tags": [...],
+ "relevance": "on_topic|borderline|off_topic", "relevance_reason": "..."}"
+
+→ Le résumé est stocké dans articles.summary
+→ Les tags sont normalisés (voir section Tags)
+→ Le verdict relevance est fusionné avec celui du gate (voir section Pertinence)`}</Code>
           </Sub>
 
           <Sub title="Étape 4 — Scoring (3 workers en parallèle)">
@@ -306,6 +360,100 @@ Reply with JSON: {"summary": "...", "tags": ["tag1", ...]}"
               un article "canonique" par cluster (le mieux scoré). Les doublons sont masqués
               dans le feed par défaut. Voir la section Déduplication.
             </P>
+          </Sub>
+        </Section>
+
+        {/* ── 2b. Pertinence ── */}
+        <Section id="relevance" title="Pertinence & filtrage">
+          <Tldr>
+            « Est-ce dans notre sujet de veille ? » est une question différente de « peut-on s'y
+            fier ? ». Le système y répond avec trois signaux successifs : un filtre géométrique
+            instantané (ancres), un avis LLM gratuit, et vos votes 👍/👎 qui entraînent un
+            classifieur personnel.
+          </Tldr>
+
+          <Sub title="Pourquoi un axe séparé de la confiance ?">
+            <P>
+              Audit réel du 12/06/2026 : la source Dev.to AI (628 articles) contenait ~50 % de spam
+              pur — <em>« Buy Verified PayPal Accounts »</em>, pronostics UFC, spa à New York… Ces
+              articles obtenaient des <strong className="text-gray-300">scores de confiance moyens
+              (44–57)</strong> : la confiance mesure la fiabilité, pas le sujet. Chaque spam consommait
+              en plus 3 appels LLM. D'où un axe « pertinence » orthogonal, avec son propre cycle de vie.
+            </P>
+          </Sub>
+
+          <Sub title="Signal 1 — Ancres contrastives (gate, avant tout LLM)">
+            <P>
+              Le périmètre de veille est défini par des phrases-ancres <strong className="text-emerald-400">positives</strong> (« large
+              language models, releases, benchmarks… ») et <strong className="text-red-400">négatives</strong> (« comptes
+              PayPal à vendre, casino, spa… » — les catégories de bruit observées). Éditables dans
+              l'Admin, embarquées une seule fois chacune.
+            </P>
+            <Code>{`marge = max_cos(article, ancres_positives) − max_cos(article, ancres_négatives)
+
+marge < −0.12          → off_topic   (statut hors_sujet, 0 appel LLM)
+−0.12 ≤ marge < +0.05  → borderline  (continue, le LLM tranchera)
+marge ≥ +0.05          → on_topic    (continue)`}</Code>
+            <P>
+              <strong className="text-yellow-400">Pourquoi une marge et pas un simple seuil ?</strong>{" "}
+              C'est un résultat de calibration mesuré sur les 4 568 articles du corpus : le cosinus
+              absolu ne sépare PAS le spam (l'espace nomic est compressé — le spam PayPal scorait
+              0.55, en plein milieu de la distribution légitime, et les pires scores absolus étaient…
+              des articles légitimes en chinois). La marge contrastive, elle, isole proprement le
+              spam : tout le spam connu &lt; −0.12, tout le légitime observé &gt; −0.10. Hypothèse →
+              mesure → pivot : la démarche complète est documentée dans le DEVLOG (session 16).
+            </P>
+          </Sub>
+
+          <Sub title="Signal 2 — Verdict LLM (gratuit, à l'enrichissement)">
+            <P>
+              Pour tout ce qui passe le gate, le prompt d'enrichissement (déjà payé) retourne aussi
+              <code className="text-indigo-300 bg-gray-900 px-1 rounded"> relevance</code> +
+              une justification d'une phrase. Fusion des deux signaux :
+            </P>
+            <Table
+              headers={["Gate (embedding)", "LLM", "Bucket final", "Statut"]}
+              rows={[
+                ["on_topic / borderline", "on_topic",   <Badge color="bg-green-900/40 text-green-300">on_topic</Badge>, "enrichi → score"],
+                ["on_topic / borderline", "borderline", <Badge color="bg-yellow-900/40 text-yellow-300">borderline</Badge>, "enrichi → score (affiché, flaggé)"],
+                ["borderline",            "off_topic",  <Badge color="bg-red-900/40 text-red-300">off_topic</Badge>, "hors_sujet (jamais scoré)"],
+                ["on_topic",              "off_topic",  <Badge color="bg-yellow-900/40 text-yellow-300">borderline</Badge>, "désaccord → affiché mais flaggé"],
+                ["—",                     "illisible",  "bucket du gate", "—"],
+              ]}
+            />
+            <P>
+              En cas de désaccord fort, on n'écarte jamais silencieusement : l'article reste visible
+              avec le badge borderline (faux négatif &gt; faux positif).
+            </P>
+          </Sub>
+
+          <Sub title="Signal 3 — Vos votes 👍/👎 (active learning)">
+            <P>
+              Chaque carte du feed a des boutons 👍/👎. Un vote agit <strong className="text-gray-300">immédiatement</strong>{" "}
+              (👎 masque l'article, 👍 le réintègre — l'humain gagne toujours) et alimente un
+              <strong className="text-gray-300"> classifieur personnel</strong> : une régression logistique
+              (numpy pur, CPU, entraînement en millisecondes — zéro VRAM) sur les embeddings 768d déjà stockés.
+            </P>
+            <P>
+              Le mode <strong className="text-indigo-300">🎯 À trier</strong> du feed est la partie
+              « active » : il présente en priorité les articles où le classifieur hésite le plus
+              (probabilité ~50 %) — c'est là que chaque vote lui apprend le maximum. Le modèle se
+              ré-entraîne automatiquement chaque heure si de nouveaux votes existent (min. 10 exemples
+              par classe), ou manuellement depuis l'Admin.
+            </P>
+          </Sub>
+
+          <Sub title="Comment lire le feed">
+            <Table
+              headers={["Élément", "Signification"]}
+              rows={[
+                [<Badge color="bg-amber-950 text-amber-400">borderline</Badge>, "Pertinence incertaine — l'article est affiché mais flaggé ; votre vote aide"],
+                [<Badge color="bg-red-950 text-red-400">hors sujet</Badge>, "Classé hors veille — visible uniquement avec la case « Show off-topic »"],
+                ["(pas de badge)", "on_topic — le cas normal, pas de bruit visuel"],
+                ["👍 / 👎", "Votre verdict — corrige le classement immédiatement + entraîne le classifieur"],
+                ["🎯 À trier", "File des articles incertains non votés, triés par incertitude décroissante"],
+              ]}
+            />
           </Sub>
         </Section>
 
@@ -382,18 +530,22 @@ Exemple : 3 claims vérifiables, 2 "supported", 1 "contested"
 
           <Sub title="Composante 4 — Fraîcheur (10%)">
             <P>
-              Pénalise les articles anciens et récompense les articles riches en contenu.
+              Moyenne de deux sous-scores distincts : la <strong className="text-gray-300">récence</strong> (date
+              de publication) et la <strong className="text-gray-300">complétude</strong> (métadonnées).
+              Historiquement les deux étaient mélangés dans une somme opaque dont le maximum réel
+              était 85/100 — ils sont désormais séparés et le détail est visible sur la page article.
             </P>
+            <Code>{`freshness = (recency + completeness) / 2`}</Code>
             <Table
-              headers={["Critère", "Points ajoutés"]}
+              headers={["Sous-score", "Critère", "Valeur"]}
               rows={[
-                ["Article publié < 24h",      "+40"],
-                ["Article publié < 72h",      "+25"],
-                ["Article publié < 7 jours",  "+10"],
-                ["Article > 7 jours ou date inconnue", "+0"],
-                ["Auteur identifié",           "+20"],
-                ["Contenu > 500 caractères",  "+25"],
-                ["Contenu entre 100-500 car.", "+10"],
+                ["Récence",    "Publié < 24h",                 "100"],
+                ["Récence",    "Publié < 72h",                 "60"],
+                ["Récence",    "Publié < 7 jours",             "25"],
+                ["Récence",    "> 7 jours ou date inconnue",   "0"],
+                ["Complétude", "Auteur identifié",             "+40"],
+                ["Complétude", "Contenu > 500 caractères",     "+60"],
+                ["Complétude", "Contenu entre 100 et 500 car.","+25"],
               ]}
             />
           </Sub>
@@ -653,8 +805,10 @@ B et C sont masqués (deduplicate=true par défaut)`}</Code>
               headers={["Méthode", "Endpoint", "Description"]}
               rows={[
                 ["GET", "/articles", "Liste paginée avec filtres"],
-                ["GET", "/articles/{id}", "Détail + score breakdown + fact-checks"],
+                ["GET", "/articles/{id}", "Détail + score breakdown + fact-checks + pertinence"],
                 ["GET", "/articles/tags/popular", "Top N tags avec comptage"],
+                ["PUT", "/articles/{id}/feedback", "Verdict humain 👍/👎 (body: {verdict})"],
+                ["DELETE", "/articles/{id}/feedback", "Retirer le verdict (bucket recalculé)"],
               ]}
             />
             <Code>{`# Paramètres GET /articles
@@ -662,9 +816,26 @@ B et C sont masqués (deduplicate=true par défaut)`}</Code>
 &tags=llm&tags=ai      # Filtre multi-tags (OR)
 &min_score=70          # Score de confiance minimum
 &source=3              # ID de source
+&relevance=borderline  # Filtre par bucket de pertinence
+&show_off_topic=true   # Afficher les hors-sujet (masqués par défaut)
 &sort_by=confidence_score&sort_dir=desc
+&sort_by=uncertainty   # File "à trier" (articles incertains non votés)
 &deduplicate=true      # Masquer les doublons de cluster (défaut: true)
 &limit=50&offset=0     # Pagination`}</Code>
+          </Sub>
+
+          <Sub title="Pertinence (ancres & ML)">
+            <Table
+              headers={["Méthode", "Endpoint", "Description"]}
+              rows={[
+                ["GET",    "/relevance/anchors",      "Liste des ancres (positives + négatives)"],
+                ["POST",   "/relevance/anchors",      "Ajouter une ancre {phrase, polarity}"],
+                ["PATCH",  "/relevance/anchors/{id}", "Modifier / activer / désactiver"],
+                ["DELETE", "/relevance/anchors/{id}", "Supprimer"],
+                ["GET",    "/relevance/model",        "État du classifieur ML (feedbacks, accuracy)"],
+                ["POST",   "/relevance/retrain",      "Ré-entraîner le classifieur maintenant"],
+              ]}
+            />
           </Sub>
 
           <Sub title="Sources">

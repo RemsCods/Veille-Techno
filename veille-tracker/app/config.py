@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     corroboration_cosine_threshold: float = 0.85
     reliability_threshold: int = 70
 
+    # Relevance gate thresholds on the CONTRASTIVE MARGIN
+    # margin = max_cos(positive anchors) - max_cos(negative anchors).
+    # Calibrated on the real corpus (4 568 articles, 2026-06-12) — see
+    # scripts/calibrate_v2_contrastive.py. All known spam < -0.12 ; legitimate
+    # content (incl. non-English) > -0.10.
+    # < t_low = off_topic (skips LLM stages) · >= t_high = on_topic · between = borderline
+    relevance_t_low: float = -0.12
+    relevance_t_high: float = 0.05
+
     @property
     def database_url(self) -> str:
         return (

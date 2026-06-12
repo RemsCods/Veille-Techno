@@ -2,6 +2,8 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { fetchArticle } from "../api";
 import ConfidenceBadge from "../components/ConfidenceBadge";
+import RelevanceBadge from "../components/RelevanceBadge";
+import FeedbackButtons from "../components/FeedbackButtons";
 import ScoreBreakdown from "../components/ScoreBreakdown";
 
 function fmtDate(iso: string | null) {
@@ -28,7 +30,10 @@ export default function ArticleDetail() {
 
       <div className="flex items-start justify-between gap-4 mb-4">
         <h1 className="text-xl font-semibold text-gray-100 leading-snug">{article.title}</h1>
-        <ConfidenceBadge score={article.confidence_score} />
+        <span className="flex items-center gap-1.5 flex-shrink-0">
+          <RelevanceBadge relevance={article.relevance} reason={article.relevance_reason} showOnTopic />
+          <ConfidenceBadge score={article.confidence_score} />
+        </span>
       </div>
 
       <div className="flex flex-wrap gap-2 text-xs text-gray-500 mb-6">
@@ -49,6 +54,38 @@ export default function ArticleDetail() {
         </section>
       )}
 
+      {/* Relevance — orthogonal axis to confidence: in the watch scope or not */}
+      <section className="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">
+            Pertinence pour la veille
+          </h2>
+          <FeedbackButtons articleId={article.id} verdict={article.feedback?.verdict ?? null} />
+        </div>
+        {article.relevance ? (
+          <div className="space-y-2 text-sm">
+            <div className="flex items-center gap-3">
+              <RelevanceBadge relevance={article.relevance} showOnTopic />
+              {article.relevance_score !== null && (
+                <span className="text-gray-500 text-xs">
+                  marge ancres : {article.relevance_score}/100 (50 = neutre)
+                </span>
+              )}
+              {article.ml_relevance !== null && (
+                <span className="text-gray-500 text-xs" title="Probabilité prédite par le classifieur entraîné sur vos 👍/👎">
+                  · classifieur ML : {article.ml_relevance}%
+                </span>
+              )}
+            </div>
+            {article.relevance_reason && (
+              <p className="text-gray-400 text-xs leading-relaxed">{article.relevance_reason}</p>
+            )}
+          </div>
+        ) : (
+          <p className="text-gray-600 text-sm">Pas encore évaluée (article en attente du gate).</p>
+        )}
+      </section>
+
       {article.confidence_score !== null && (
         <section className="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-6">
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-4">
@@ -59,6 +96,8 @@ export default function ArticleDetail() {
             corroboration={article.score_breakdown?.corroboration}
             factCheck={article.score_breakdown?.fact_check}
             freshness={article.score_breakdown?.freshness}
+            recency={article.score_breakdown?.recency}
+            completeness={article.score_breakdown?.completeness}
           />
         </section>
       )}

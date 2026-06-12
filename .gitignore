@@ -34,3 +34,6 @@ veille-tracker/db_data/
 .idea/
 *.swp
 *.swo
+
+# DB backups (created before migrations — keep local only)
+veille-tracker/db/backups/

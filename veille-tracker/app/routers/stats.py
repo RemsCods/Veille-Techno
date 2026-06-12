@@ -68,6 +68,13 @@ class LogAdminOut(BaseModel):
     errors: Optional[str]
 
 
+class PipelineErrorOut(BaseModel):
+    stage: str                      # gate | enrich | score
+    article_id: Optional[int]
+    message: str
+    at: str                         # ISO timestamp
+
+
 class AdminStatsOut(BaseModel):
     # Pipeline counts
     pipeline: dict[str, int]
@@ -85,9 +92,13 @@ class AdminStatsOut(BaseModel):
     enriched_per_min: float
     scored_per_min: float
     embedded_per_min: float
+    gated_per_min: float
     enrich_errors_per_min: float
     score_errors_per_min: float
     scoring_active: int
+    # Pipeline error details (last 50, newest first) + cumulative totals since startup
+    pipeline_errors: list[PipelineErrorOut]
+    pipeline_error_totals: dict[str, int]
     # Rate history (up to 12 points × 30s = last 6 min) for sparklines
     rate_history: list[RatePoint]
     # Embeddings
@@ -99,6 +110,12 @@ class AdminStatsOut(BaseModel):
     eta_score_min: Optional[float]
     # Score distribution buckets
     score_distribution: dict[str, int]
+    # Relevance
+    relevance_distribution: dict[str, int]   # on_topic / borderline / off_topic / unclassified
+    llm_calls_saved: int                     # articles stopped by the gate (status hors_sujet) × 3
+    feedback_count: int
+    ml_last_trained: Optional[datetime]
+    ml_accuracy: Optional[float]
     # Coverage (pct of scored articles)
     corroboration_coverage: float
     fact_check_coverage: float
@@ -261,6 +278,18 @@ def get_admin_stats(db: Session = Depends(get_db)):
         for log, name in error_rows
     ]
 
+    # ── Relevance ────────────────────────────────────────────────────────
+    rel_rows = db.query(Article.relevance, func.count(Article.id)).group_by(Article.relevance).all()
+    relevance_distribution = {"on_topic": 0, "borderline": 0, "off_topic": 0, "unclassified": 0}
+    for rel, count in rel_rows:
+        relevance_distribution[rel or "unclassified"] = count
+    # Articles stopped at the gate never consume the 3 LLM calls
+    # (1 enrichment + 2 fact-check) — that is the GPU budget saved.
+    gate_stopped = by_status.get("hors_sujet", 0)
+    from models import Feedback, MlModel
+    feedback_count = db.query(func.count(Feedback.article_id)).scalar() or 0
+    last_model = db.query(MlModel).order_by(MlModel.trained_at.desc()).first()
+
     # ── Embeddings ───────────────────────────────────────────────────────
     embeddings_done = db.query(func.count(Embedding.article_id)).scalar() or 0
 
@@ -268,7 +297,11 @@ def get_admin_stats(db: Session = Depends(get_db)):
     from pipeline_stats import stats as _stats
     rates = _stats.snapshot()
 
-    pending_enrich     = by_status.get("collecte", 0) + by_status.get("processing", 0)
+    pending_enrich     = (
+        by_status.get("collecte", 0)
+        + by_status.get("pertinent", 0)
+        + by_status.get("processing", 0)
+    )
     pending_score      = pending_enrich + n_enrichi
     embeddings_missing = total - embeddings_done
 
@@ -289,9 +322,12 @@ def get_admin_stats(db: Session = Depends(get_db)):
         enriched_per_min=rates["enriched_per_min"],
         scored_per_min=rates["scored_per_min"],
         embedded_per_min=rates["embedded_per_min"],
+        gated_per_min=rates["gated_per_min"],
         enrich_errors_per_min=rates["enrich_errors_per_min"],
         score_errors_per_min=rates["score_errors_per_min"],
         scoring_active=rates["scoring_active"],
+        pipeline_errors=[PipelineErrorOut(**e) for e in rates["recent_errors"]],
+        pipeline_error_totals=rates["error_totals"],
         rate_history=[RatePoint(**h) for h in rates["history"]],
         embeddings_done=embeddings_done,
         embeddings_total=total,
@@ -299,6 +335,11 @@ def get_admin_stats(db: Session = Depends(get_db)):
         eta_enrich_min=eta_enrich,
         eta_score_min=eta_score,
         score_distribution=score_distribution,
+        relevance_distribution=relevance_distribution,
+        llm_calls_saved=gate_stopped * 3,
+        feedback_count=feedback_count,
+        ml_last_trained=last_model.trained_at if last_model else None,
+        ml_accuracy=last_model.accuracy if last_model else None,
         corroboration_coverage=corr_coverage,
         fact_check_coverage=fc_coverage,
         top_tags=top_tags,

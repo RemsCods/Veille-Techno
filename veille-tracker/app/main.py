@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import articles, sources, blacklist, stats
+from routers import articles, sources, blacklist, stats, relevance
 from scheduler import start_scheduler
 from database import SessionLocal
 from models import Article
@@ -41,6 +41,7 @@ app.include_router(articles.router)
 app.include_router(sources.router)
 app.include_router(blacklist.router)
 app.include_router(stats.router)
+app.include_router(relevance.router)
 
 
 @app.get("/health", tags=["health"])

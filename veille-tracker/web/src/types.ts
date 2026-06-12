@@ -3,6 +3,8 @@ export interface Tag {
   name: string;
 }
 
+export type RelevanceBucket = "on_topic" | "borderline" | "off_topic";
+
 export interface Article {
   id: number;
   source_id: number;
@@ -13,6 +15,11 @@ export interface Article {
   published_at: string | null;
   collected_at: string;
   confidence_score: number | null;
+  relevance: RelevanceBucket | null;
+  relevance_score: number | null;   // 0-100, 50 = neutral margin
+  relevance_reason: string | null;
+  ml_relevance: number | null;      // learned classifier probability, 0-100
+  feedback: { verdict: "pertinent" | "non_pertinent" } | null;
   status: string;
   tags: Tag[];
   cluster_size: number;  // >1 = canonical with N-1 similar articles from other sources
@@ -34,7 +41,9 @@ export interface ScoreBreakdown {
   source: number;
   corroboration: number;
   fact_check: number;
-  freshness: number;
+  freshness: number;      // average of recency + completeness
+  recency: number;
+  completeness: number;
 }
 
 export interface ArticleDetail extends Article {
@@ -101,6 +110,13 @@ export interface LogAdmin {
   errors: string | null;
 }
 
+export interface PipelineError {
+  stage: string;             // gate | enrich | score
+  article_id: number | null;
+  message: string;
+  at: string;
+}
+
 export interface AdminStats {
   pipeline: Record<string, number>;
   pct_enriched: number;
@@ -114,9 +130,12 @@ export interface AdminStats {
   enriched_per_min: number;
   scored_per_min: number;
   embedded_per_min: number;
+  gated_per_min: number;
   enrich_errors_per_min: number;
   score_errors_per_min: number;
   scoring_active: number;
+  pipeline_errors: PipelineError[];
+  pipeline_error_totals: Record<string, number>;
   rate_history: RatePoint[];
   embeddings_done: number;
   embeddings_total: number;
@@ -124,6 +143,11 @@ export interface AdminStats {
   eta_enrich_min: number | null;
   eta_score_min: number | null;
   score_distribution: Record<string, number>;
+  relevance_distribution: Record<string, number>;
+  llm_calls_saved: number;
+  feedback_count: number;
+  ml_last_trained: string | null;
+  ml_accuracy: number | null;
   corroboration_coverage: number;
   fact_check_coverage: number;
   top_tags: TagCount[];
@@ -131,6 +155,25 @@ export interface AdminStats {
   error_logs: LogAdmin[];
   sources: SourceAdmin[];
   recent_logs: LogAdmin[];
+}
+
+export interface Anchor {
+  id: number;
+  phrase: string;
+  polarity: "positive" | "negative";
+  active: boolean;
+  created_at: string;
+}
+
+export interface MlModelStatus {
+  trained_at: string | null;
+  n_samples: number;
+  n_positive: number;
+  accuracy: number | null;
+  feedback_count: number;
+  feedback_positive: number;
+  min_per_class: number;
+  trainable: boolean;
 }
 
 export interface TableStat {

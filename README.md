@@ -79,10 +79,13 @@ This principle — drawn directly from the course — underpins the entire scori
 
 ### State machine (MariaDB-backed)
 
-Articles progress through three states tracked in the `articles.status` column:
+Articles progress through states tracked in the `articles.status` column:
 
 ```
-collecte  →  enrichi  →  score
+collecte → [relevance gate] → pertinent → enrichi → score
+                 │
+                 └→ hors_sujet   (off-topic: kept in DB, hidden from feed,
+                                  never enriched/scored — saves 3 LLM calls/article)
 ```
 
 No external queue (Redis/arq was dropped). Workers poll the DB for articles in the preceding state and advance them on success.
@@ -116,9 +119,10 @@ No external queue (Redis/arq was dropped). Workers poll the DB for articles in t
 
 - **Proxmox** — hypervisor hosting the VM + LXC-AI container
 - **Docker + Docker Compose** — container orchestration on the VM
-- **Ollama** — local LLM runtime with GPU passthrough
-  - `llama3.1:8b` — summarisation, tagging, fact-check
-  - `nomic-embed-text` — article embeddings
+- **Ollama** — local LLM runtime with GPU passthrough (16 GB VRAM budget, all three models resident)
+  - `qwen3.5:9b` — summarisation, tagging, relevance verdict, primary fact-check
+  - `llama3.2:3b` — secondary fact-check (cross-family double-check)
+  - `nomic-embed-text` — article embeddings + relevance gate anchors
 
 ---
 
@@ -141,12 +145,59 @@ Score = 0.40 × score_source
 
 **`score_fact_check` (20%)** — LLM-based pass that extracts verifiable factual claims from the article and marks each as *supported*, *unsupported*, or *unverifiable*. Score = ratio of supported to total verifiable claims.
 
-**`score_freshness_coherence` (10%)** — Quality signals: recency of publication, presence of a named author, article length, and structural markers (headings, citations).
+**`score_freshness` (10%)** — Average of two sub-scores, shown separately in the article detail view: *recency* (publication date: <24h = 100, <72h = 60, <7d = 25) and *completeness* (named author +40, content >500 chars +60).
 
 ### Reliability threshold
 
 **≥ 70 / 100 → reliable** (green badge)
 **< 70 / 100 → flagged** (yellow badge, "verify before sharing")
+
+---
+
+## Relevance (orthogonal axis to confidence)
+
+Confidence answers *"can we trust it?"* — relevance answers *"is it in our watch scope?"*.
+The two are never merged: a reliable article can be off-topic and vice versa.
+Motivation (measured 2026-06-12): ~50% of the Dev.to AI source was pure spam
+(*"Buy Verified PayPal Accounts"*, UFC picks…) scoring mid-range confidence (44–57)
+and burning 3 LLM calls each.
+
+Three successive signals:
+
+**1. Contrastive anchor gate** (`relevance.py` + `workers/relevance_gate.py`, no LLM) —
+the article embedding is compared to *positive* anchors (the watch scope) and *negative*
+anchors (observed junk categories), both editable in the Admin UI:
+
+```
+margin = max_cos(positive anchors) − max_cos(negative anchors)
+
+margin < −0.12          → off_topic   (status hors_sujet, 0 LLM calls)
+−0.12 ≤ margin < +0.05  → borderline  (continues, LLM decides)
+margin ≥ +0.05          → on_topic
+```
+
+Calibration finding (the interesting part): an **absolute** cosine threshold does *not*
+work — nomic's cosine space is compressed (0.39–0.82), spam sat mid-distribution (0.55)
+and the lowest absolute scores were legitimate non-English articles. The contrastive
+**margin** cleanly separates: all known spam < −0.12, all legitimate content > −0.10.
+Thresholds were measured on the real corpus (`scripts/calibrate_v2_contrastive.py`),
+not invented.
+
+**2. LLM verdict** (zero extra cost) — the existing enrichment prompt also returns
+`relevance: on_topic|borderline|off_topic` + a one-sentence reason. Merged with the
+gate verdict; on sharp disagreement the article stays visible as *borderline*
+(a false negative costs more than a false positive in a watch system).
+
+**3. Human feedback + active learning** — 👍/👎 buttons on every card. A verdict acts
+immediately (human always wins) and trains a logistic-regression classifier
+(pure numpy on the stored 768-d embeddings — CPU, milliseconds, zero VRAM).
+The feed's *"À trier"* mode surfaces the articles the model is least sure about
+(uncertainty sampling), so each click teaches it the most. Hourly auto-retrain
+when new feedback exists (min 10 examples per class).
+
+Off-topic articles are **never deleted**: hidden from the default feed, auditable via
+*"Show off-topic"*, re-includable with one click. Backfill of the pre-existing corpus
+(4,580 articles): 79.3% on_topic · 19.8% borderline · 0.9% off_topic.
 
 ---
 
@@ -267,8 +318,13 @@ Exposed by the `app` container. The full interactive doc is available at `/docs`
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/articles` | Paginated feed with filters: `source`, `min_score`, `category`, `from_date` |
-| `GET` | `/articles/{id}` | Article detail + corroborations + fact-check results |
+| `GET` | `/articles` | Paginated feed with filters: `source`, `min_score`, `relevance`, `show_off_topic`, `sort_by=uncertainty`, … |
+| `GET` | `/articles/{id}` | Article detail + corroborations + fact-check + relevance breakdown |
+| `PUT` | `/articles/{id}/feedback` | Human relevance verdict 👍/👎 (`{"verdict": "pertinent"\|"non_pertinent"}`) |
+| `DELETE` | `/articles/{id}/feedback` | Remove the verdict (bucket recomputed from margin) |
+| `GET/POST/PATCH/DELETE` | `/relevance/anchors[/{id}]` | Manage the watch-scope anchors (positive/negative) |
+| `GET` | `/relevance/model` | Active-learning classifier status |
+| `POST` | `/relevance/retrain` | Retrain the classifier now |
 | `GET` | `/sources` | List all sources |
 | `POST` | `/sources` | Add a new source |
 | `PATCH` | `/sources/{id}` | Update source (score, active flag) |

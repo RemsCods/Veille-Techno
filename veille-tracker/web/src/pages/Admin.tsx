@@ -3,6 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   collectAll, fetchAdminStats, fetchDbStats,
   createSource, updateSource, deleteSource, collectSource,
+  fetchAnchors, createAnchor, patchAnchor, deleteAnchor,
+  fetchMlModel, retrainModel,
 } from "../api";
 import type { SourceAdmin, SourceCreatePayload } from "../types";
 
@@ -280,6 +282,164 @@ function SourceModal({
 }
 
 
+// ── Topic anchors (watch scope) ───────────────────────────────────────────────
+
+function AnchorsSection() {
+  const queryClient = useQueryClient();
+  const { data: anchors = [] } = useQuery({ queryKey: ["anchors"], queryFn: fetchAnchors });
+  const [phrase, setPhrase] = useState("");
+  const [polarity, setPolarity] = useState<"positive" | "negative">("positive");
+
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["anchors"] });
+
+  const addMutation = useMutation({
+    mutationFn: () => createAnchor(phrase.trim(), polarity),
+    onSuccess: () => { setPhrase(""); invalidate(); },
+  });
+
+  const renderGroup = (pol: "positive" | "negative") => {
+    const group = anchors.filter((a) => a.polarity === pol);
+    return (
+      <div>
+        <div className={`text-xs font-medium mb-2 ${pol === "positive" ? "text-emerald-400" : "text-red-400"}`}>
+          {pol === "positive" ? "✚ Le périmètre de veille (positives)" : "− Le bruit connu (négatives)"}
+          <span className="text-gray-600 ml-1.5">{group.length}</span>
+        </div>
+        <ul className="space-y-1">
+          {group.map((a) => (
+            <li key={a.id} className={`flex items-center gap-2 text-xs rounded px-2 py-1.5 bg-gray-800/40 ${!a.active ? "opacity-40" : ""}`}>
+              <span className="flex-1 text-gray-300">{a.phrase}</span>
+              <button
+                title={a.active ? "Désactiver" : "Activer"}
+                onClick={() => patchAnchor(a.id, { active: !a.active }).then(invalidate)}
+                className={a.active ? "text-green-500 hover:text-yellow-400" : "text-gray-600 hover:text-green-400"}
+              >
+                {a.active ? "●" : "○"}
+              </button>
+              <button
+                title="Supprimer"
+                onClick={() => deleteAnchor(a.id).then(invalidate)}
+                className="text-gray-600 hover:text-red-400"
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg p-5">
+      <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-1">
+        Topic anchors — périmètre de veille
+      </h2>
+      <p className="text-xs text-gray-600 mb-4">
+        Pertinence = marge entre la similarité aux ancres positives et négatives.
+        Modifier les ancres recalibre le gate pour les prochains articles (cache 5 min).
+      </p>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-4">
+        {renderGroup("positive")}
+        {renderGroup("negative")}
+      </div>
+
+      <form
+        onSubmit={(e) => { e.preventDefault(); if (phrase.trim()) addMutation.mutate(); }}
+        className="flex flex-wrap items-center gap-2 pt-3 border-t border-gray-800"
+      >
+        <input
+          value={phrase}
+          onChange={(e) => setPhrase(e.target.value)}
+          placeholder="Nouvelle ancre — ex : robotics and embodied AI systems"
+          className="flex-1 min-w-[260px] bg-gray-950 border border-gray-700 rounded px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500"
+        />
+        <select
+          value={polarity}
+          onChange={(e) => setPolarity(e.target.value as "positive" | "negative")}
+          className="bg-gray-950 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200"
+        >
+          <option value="positive">positive (sujet)</option>
+          <option value="negative">négative (bruit)</option>
+        </select>
+        <button
+          type="submit"
+          disabled={addMutation.isPending || !phrase.trim()}
+          className="px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40 text-xs font-medium transition-colors"
+        >
+          {addMutation.isPending ? "…" : "+ Ajouter"}
+        </button>
+        {addMutation.isError && (
+          <span className="text-xs text-red-400">{String((addMutation.error as Error).message)}</span>
+        )}
+      </form>
+    </div>
+  );
+}
+
+// ── ML classifier card (active learning) ──────────────────────────────────────
+
+function MlCard({ feedbackCount }: { feedbackCount: number }) {
+  const queryClient = useQueryClient();
+  const { data: model } = useQuery({
+    queryKey: ["ml-model"],
+    queryFn: fetchMlModel,
+    refetchInterval: 30_000,
+  });
+  const [result, setResult] = useState<string | null>(null);
+
+  const retrain = useMutation({
+    mutationFn: retrainModel,
+    onSuccess: (r) => {
+      setResult(r.trained
+        ? `Entraîné : ${r.n_samples} exemples, ${r.accuracy}% accuracy`
+        : r.reason ?? "non entraîné");
+      queryClient.invalidateQueries({ queryKey: ["ml-model"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-stats"] });
+      setTimeout(() => setResult(null), 8000);
+    },
+  });
+
+  const neg = model ? model.feedback_count - model.feedback_positive : 0;
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs text-gray-500 uppercase tracking-wide">
+          Classifieur ML (active learning)
+        </div>
+        <button
+          onClick={() => retrain.mutate()}
+          disabled={retrain.isPending || !model?.trainable}
+          title={model?.trainable ? "Ré-entraîner maintenant" : `Il faut ≥ ${model?.min_per_class ?? 10} exemples par classe`}
+          className="px-2.5 py-1 rounded bg-indigo-800 hover:bg-indigo-700 disabled:opacity-40 text-xs transition-colors"
+        >
+          {retrain.isPending ? "…" : "↻ retrain"}
+        </button>
+      </div>
+      <div className="text-sm text-gray-300 space-y-1">
+        <p>
+          <span className="text-gray-500">Feedbacks :</span>{" "}
+          {feedbackCount} <span className="text-gray-600">(👍 {model?.feedback_positive ?? 0} · 👎 {neg})</span>
+        </p>
+        {model?.trained_at ? (
+          <p>
+            <span className="text-gray-500">Dernier train :</span>{" "}
+            {new Date(model.trained_at).toLocaleString("fr-FR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+            {model.accuracy !== null && <span className="text-emerald-400 ml-2">{model.accuracy}% acc.</span>}
+          </p>
+        ) : (
+          <p className="text-gray-600 text-xs">
+            Pas encore de modèle — votez 👍/👎 dans le feed ({model?.min_per_class ?? 10} min par classe), il s'entraîne ensuite tout seul (cron horaire).
+          </p>
+        )}
+        {result && <p className="text-xs text-indigo-300">{result}</p>}
+      </div>
+    </div>
+  );
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Admin() {
@@ -341,9 +501,13 @@ export default function Admin() {
 
   const total     = data.pipeline.total    ?? 0;
   const collecte  = data.pipeline.collecte  ?? 0;
+  const pertinent = data.pipeline.pertinent ?? 0;
+  const horsSujet = data.pipeline.hors_sujet ?? 0;
   const processing = data.pipeline.processing ?? 0;
   const enrichi   = data.pipeline.enrichi   ?? 0;
   const scored    = data.pipeline.score     ?? 0;
+  const totalPipelineErrors = Object.values(data.pipeline_error_totals).reduce((a, b) => a + b, 0);
+  const relTotal = Object.values(data.relevance_distribution).reduce((a, b) => a + b, 0);
 
   const enrichHistory  = data.rate_history.map((h) => h.enriched);
   const scoreHistory   = data.rate_history.map((h) => h.scored);
@@ -389,6 +553,45 @@ export default function Admin() {
                 </pre>
               </div>
             ))}
+          </div>
+        </details>
+      )}
+
+      {/* ── Pipeline errors (enrich/score/gate) ──────────────────────────── */}
+      {/* Before: only err/min rates were shown, with no detail anywhere — a
+          burst would flash "err/min" for 60s then vanish without a trace. */}
+      {totalPipelineErrors > 0 && (
+        <details className="bg-amber-950/30 border border-amber-800/50 rounded-lg">
+          <summary className="flex items-center gap-2 px-4 py-3 text-sm text-amber-300 cursor-pointer select-none list-none">
+            <span className="text-amber-500 text-base">⚠</span>
+            <span className="font-medium">
+              {totalPipelineErrors} pipeline error{totalPipelineErrors > 1 ? "s" : ""} since startup
+            </span>
+            <span className="text-amber-700/80 text-xs">
+              {Object.entries(data.pipeline_error_totals).map(([k, v]) => `${k}: ${v}`).join(" · ")}
+            </span>
+            <span className="ml-auto text-amber-700 text-xs">click to expand</span>
+          </summary>
+          <div className="px-4 pb-4 space-y-1.5 max-h-72 overflow-y-auto">
+            {data.pipeline_errors.map((e, i) => (
+              <div key={i} className="rounded bg-amber-950/40 border border-amber-900/30 px-3 py-2 text-xs">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-300 font-mono">{e.stage}</span>
+                  {e.article_id !== null && (
+                    <a href={`/articles/${e.article_id}`} className="text-indigo-400 hover:text-indigo-300">
+                      article #{e.article_id}
+                    </a>
+                  )}
+                  <span className="ml-auto text-gray-600">{fmtDate(e.at)}</span>
+                </div>
+                <pre className="text-amber-200/70 whitespace-pre-wrap break-all font-mono leading-relaxed">{e.message}</pre>
+              </div>
+            ))}
+            {data.pipeline_errors.length === 0 && (
+              <p className="text-xs text-gray-500 pb-2">
+                Aucune erreur récente en mémoire (les compteurs cumulés datent du démarrage du conteneur).
+              </p>
+            )}
           </div>
         </details>
       )}
@@ -495,14 +698,21 @@ export default function Admin() {
         <div className="flex flex-wrap gap-3 pt-1 border-t border-gray-800">
           {[
             { label: "collecte",   count: collecte,   color: "text-gray-400" },
+            { label: "pertinent",  count: pertinent,  color: "text-purple-400" },
             { label: "processing", count: processing,  color: "text-orange-400" },
             { label: "enrichi",    count: enrichi,     color: "text-blue-400" },
             { label: "score",      count: scored,      color: "text-green-400" },
+            { label: "hors sujet", count: horsSujet,   color: "text-red-400" },
           ].map(({ label, count, color }) => (
             <span key={label} className="text-xs text-gray-600">
               {label}: <span className={`${color} font-medium`}>{fmtNum(count)}</span>
             </span>
           ))}
+          {data.gated_per_min > 0 && (
+            <span className="text-xs text-purple-400 animate-pulse ml-auto">
+              ⚙ gate : {data.gated_per_min}/min
+            </span>
+          )}
         </div>
 
         <p className="text-xs text-gray-700">auto-refresh every 5s · sparklines = last 6 min (30s intervals)</p>
@@ -588,6 +798,56 @@ export default function Admin() {
           </div>
         </div>
       </div>
+
+      {/* ── Relevance + ML ────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Relevance distribution */}
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-5">
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-1">
+            Pertinence
+            <span className="text-gray-600 font-normal ml-2 normal-case">({fmtNum(relTotal)} articles)</span>
+          </h2>
+          <p className="text-xs text-gray-600 mb-4">
+            Axe orthogonal à la confiance : l'article est-il dans le périmètre de veille ?
+          </p>
+          <div className="space-y-2.5">
+            {(
+              [
+                { key: "on_topic",     color: "bg-emerald-500", label: "on topic" },
+                { key: "borderline",   color: "bg-amber-500",   label: "borderline" },
+                { key: "off_topic",    color: "bg-red-500",     label: "hors sujet" },
+                { key: "unclassified", color: "bg-gray-600",    label: "non classé" },
+              ] as const
+            ).map(({ key, color, label }) => {
+              const count = data.relevance_distribution[key] ?? 0;
+              const pct = relTotal > 0 ? (count / relTotal) * 100 : 0;
+              return (
+                <div key={key} className="flex items-center gap-3">
+                  <span className="text-xs text-gray-500 w-20 text-right">{label}</span>
+                  <div className="flex-1 bg-gray-800 rounded-full h-2">
+                    <div className={`${color} h-2 rounded-full transition-all duration-500`} style={{ width: `${pct}%` }} />
+                  </div>
+                  <span className="text-xs text-gray-400 w-24 text-right tabular-nums">
+                    {fmtNum(count)} <span className="text-gray-600">({pct.toFixed(1)}%)</span>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          {data.llm_calls_saved > 0 && (
+            <p className="text-xs text-gray-600 mt-4 pt-3 border-t border-gray-800">
+              💡 <span className="text-purple-400 font-medium">{fmtNum(data.llm_calls_saved)}</span> appels
+              LLM économisés par le gate ({fmtNum(horsSujet)} articles stoppés avant enrichissement × 3 appels)
+            </p>
+          )}
+        </div>
+
+        {/* ML classifier */}
+        <MlCard feedbackCount={data.feedback_count} />
+      </div>
+
+      {/* ── Topic anchors ─────────────────────────────────────────────────── */}
+      <AnchorsSection />
 
       {/* ── Sources ───────────────────────────────────────────────────────── */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-5">

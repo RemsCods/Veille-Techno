@@ -53,6 +53,12 @@ class FactCheckOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class FeedbackOut(BaseModel):
+    verdict: str    # pertinent | non_pertinent
+
+    model_config = {"from_attributes": True}
+
+
 class ArticleOut(BaseModel):
     id: int
     source_id: int
@@ -63,6 +69,11 @@ class ArticleOut(BaseModel):
     published_at: Optional[datetime] = None
     collected_at: datetime
     confidence_score: Optional[float] = None
+    relevance: Optional[str] = None          # on_topic | borderline | off_topic
+    relevance_score: Optional[float] = None  # 0-100, 50 = neutral margin
+    relevance_reason: Optional[str] = None
+    ml_relevance: Optional[float] = None     # learned classifier probability, 0-100
+    feedback: Optional[FeedbackOut] = None   # human 👍/👎 verdict
     status: str
     tags: list[TagOut] = []
     cluster_size: int = 1    # >1 means this article is a cluster canonical with duplicates
@@ -74,7 +85,9 @@ class ScoreBreakdownOut(BaseModel):
     source: float
     corroboration: float
     fact_check: float
-    freshness: float
+    freshness: float        # average of recency + completeness
+    recency: float          # publication date freshness
+    completeness: float     # author + content length
 
 
 class ArticleDetail(ArticleOut):
@@ -106,3 +119,41 @@ class StatsOut(BaseModel):
     pct_reliable: float
     avg_score: Optional[float]
     articles_by_status: dict[str, int]
+
+
+# ── Relevance / feedback / anchors ────────────────────────────────────────────
+
+class FeedbackCreate(BaseModel):
+    verdict: str    # pertinent | non_pertinent
+
+
+class AnchorCreate(BaseModel):
+    phrase: str
+    polarity: str = "positive"   # positive | negative
+
+
+class AnchorPatch(BaseModel):
+    phrase: Optional[str] = None
+    polarity: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class AnchorOut(BaseModel):
+    id: int
+    phrase: str
+    polarity: str
+    active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MlModelOut(BaseModel):
+    trained_at: Optional[datetime] = None
+    n_samples: int = 0
+    n_positive: int = 0
+    accuracy: Optional[float] = None
+    feedback_count: int = 0          # current labels available
+    feedback_positive: int = 0
+    min_per_class: int = 10
+    trainable: bool = False

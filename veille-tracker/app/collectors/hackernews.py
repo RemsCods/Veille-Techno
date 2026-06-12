@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 import httpx
@@ -13,6 +14,13 @@ AI_KEYWORDS = [
     "machine learning", "deep learning", "neural", "openai",
     "anthropic", "hugging face", "ollama", "diffusion", "embedding",
 ]
+
+# Word-boundary matching — substring matching gave false positives:
+# "gpt" matched "Egypt", "llm" matched "Wellman".
+_KEYWORD_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in AI_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
 
 
 def collect_hackernews(source: Source, db: Session) -> int:
@@ -63,7 +71,7 @@ def collect_hackernews(source: Source, db: Session) -> int:
         if not title:
             continue
         if not has_custom_query:
-            if not any(kw in title.lower() for kw in AI_KEYWORDS):
+            if not _KEYWORD_RE.search(title):
                 continue
 
         ts = hit.get("created_at_i")

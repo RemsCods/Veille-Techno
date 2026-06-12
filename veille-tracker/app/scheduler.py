@@ -56,15 +56,19 @@ _SCORER_BATCH     = 25  # articles per scorer per round
 
 
 def _continuous_pipeline() -> None:
+    from workers.relevance_gate import run_relevance_gate
     from workers.enricher import run_enricher
     from workers.scorer import run_scorer
     from workers.embed_missing import run_embed_missing
     from workers.cluster import run_cluster
 
-    pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pipeline")
+    pool = ThreadPoolExecutor(max_workers=9, thread_name_prefix="pipeline")
 
     while not _pipeline_stop.is_set():
         try:
+            # Gate runs first in the funnel: collecte → pertinent | hors_sujet.
+            # Off-topic articles never reach the enricher/scorer LLM calls.
+            f_g  = pool.submit(run_relevance_gate, 30)
             f_e1 = pool.submit(run_enricher,      _ENRICHER_BATCH)
             f_e2 = pool.submit(run_enricher,      _ENRICHER_BATCH)
             f_e3 = pool.submit(run_enricher,      _ENRICHER_BATCH)
@@ -74,13 +78,14 @@ def _continuous_pipeline() -> None:
             f_em = pool.submit(run_embed_missing,  30)
             f_cl = pool.submit(run_cluster,       100)  # cluster after scoring
 
-            futures_wait([f_e1, f_e2, f_e3, f_s1, f_s2, f_s3, f_em, f_cl])
+            futures_wait([f_g, f_e1, f_e2, f_e3, f_s1, f_s2, f_s3, f_em, f_cl])
+            n_gated     = f_g.result()
             n_enriched  = f_e1.result() + f_e2.result() + f_e3.result()
             n_scored    = f_s1.result() + f_s2.result() + f_s3.result()
             n_embedded  = f_em.result()
             n_clustered = f_cl.result()
 
-            if n_enriched == 0 and n_scored == 0 and n_embedded == 0 and n_clustered == 0:
+            if n_gated == 0 and n_enriched == 0 and n_scored == 0 and n_embedded == 0 and n_clustered == 0:
                 _pipeline_stop.wait(timeout=15)
         except Exception:
             _pipeline_stop.wait(timeout=10)
@@ -110,6 +115,16 @@ def start_scheduler() -> None:
             day=arxiv_parts[2], month=arxiv_parts[3], day_of_week=arxiv_parts[4],
         ),
         id="collect_api",
+        replace_existing=True,
+    )
+
+    # Hourly: retrain the relevance classifier if new 👍/👎 feedback arrived
+    # (numpy logistic regression on stored embeddings — CPU, milliseconds)
+    from workers.learner import retrain_if_new_feedback
+    _scheduler.add_job(
+        retrain_if_new_feedback,
+        CronTrigger(minute="10"),
+        id="relevance_retrain",
         replace_existing=True,
     )
 

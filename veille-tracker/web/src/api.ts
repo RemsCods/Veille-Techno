@@ -29,11 +29,13 @@ export const fetchArticles = (
   params: URLSearchParams,
   tags: string[] = [],
   deduplicate = true,
+  showOffTopic = false,
 ) => {
   // Clone so we don't mutate the caller's params
   const p = new URLSearchParams(params);
   tags.forEach((t) => p.append("tags", t));
   if (!deduplicate) p.set("deduplicate", "false");
+  if (showOffTopic) p.set("show_off_topic", "true");
   return get<import("./types").Article[]>(`/articles?${p}`);
 };
 
@@ -70,3 +72,31 @@ export const deleteSource = (id: number, hard = false) =>
 
 export const collectSource = (id: number) =>
   get<{ status: string; source_id: number }>(`/sources/${id}/collect`);
+
+// ── Relevance: feedback, anchors, ML ─────────────────────────────────────────
+
+export const setFeedback = (articleId: number, verdict: "pertinent" | "non_pertinent") =>
+  req<import("./types").Article>("PUT", `/articles/${articleId}/feedback`, { verdict });
+
+export const removeFeedback = (articleId: number) =>
+  req<import("./types").Article>("DELETE", `/articles/${articleId}/feedback`);
+
+export const fetchAnchors = () =>
+  get<import("./types").Anchor[]>("/relevance/anchors");
+
+export const createAnchor = (phrase: string, polarity: "positive" | "negative") =>
+  req<import("./types").Anchor>("POST", "/relevance/anchors", { phrase, polarity });
+
+export const patchAnchor = (id: number, data: Partial<Pick<import("./types").Anchor, "phrase" | "polarity" | "active">>) =>
+  req<import("./types").Anchor>("PATCH", `/relevance/anchors/${id}`, data);
+
+export const deleteAnchor = (id: number) =>
+  req<void>("DELETE", `/relevance/anchors/${id}`);
+
+export const fetchMlModel = () =>
+  get<import("./types").MlModelStatus>("/relevance/model");
+
+export const retrainModel = () =>
+  req<{ trained: boolean; reason?: string; accuracy?: number; n_samples?: number }>(
+    "POST", "/relevance/retrain",
+  );

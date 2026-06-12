@@ -61,8 +61,13 @@ class Article(Base):
     published_at     = Column(DateTime)
     collected_at     = Column(DateTime, nullable=False, default=datetime.utcnow)
     confidence_score = Column(Float)
+    # Relevance = in the watch scope or not (independent axis from confidence)
+    relevance        = Column(Enum("on_topic", "borderline", "off_topic"))
+    relevance_score  = Column(Float)                # embedding vs anchors, 0-100
+    relevance_reason = Column(String(500))          # closest anchor / LLM reason / human feedback
+    ml_relevance     = Column(Float)                # learned classifier probability, 0-100
     status           = Column(
-        Enum("collecte", "processing", "enrichi", "score"),
+        Enum("collecte", "processing", "pertinent", "enrichi", "score", "hors_sujet"),
         nullable=False,
         default="collecte",
     )
@@ -74,6 +79,7 @@ class Article(Base):
     tags         = relationship("Tag", secondary="articles_tags", back_populates="articles")
     embedding    = relationship("Embedding", back_populates="article", uselist=False)
     fact_checks  = relationship("FactCheck", back_populates="article")
+    feedback     = relationship("Feedback", back_populates="article", uselist=False)
     corroborations_as_main = relationship(
         "Corroboration",
         foreign_keys="Corroboration.article_id",
@@ -114,6 +120,39 @@ class FactCheck(Base):
     secondary_status   = Column(String(20))   # raw verdict from model B (for transparency)
 
     article = relationship("Article", back_populates="fact_checks")
+
+
+class TopicAnchor(Base):
+    __tablename__ = "topic_anchors"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    phrase     = Column(String(300), nullable=False, unique=True)
+    # positive = what the watch IS about · negative = observed junk categories
+    # (relevance = contrastive margin between the two — see relevance.py)
+    polarity   = Column(Enum("positive", "negative"), nullable=False, default="positive")
+    active     = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class Feedback(Base):
+    __tablename__ = "feedback"
+
+    article_id = Column(Integer, ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True)
+    verdict    = Column(Enum("pertinent", "non_pertinent"), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    article = relationship("Article", back_populates="feedback")
+
+
+class MlModel(Base):
+    __tablename__ = "ml_models"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    trained_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    n_samples  = Column(Integer, nullable=False)
+    n_positive = Column(Integer, nullable=False)
+    accuracy   = Column(Float)
+    weights    = Column(LargeBinary, nullable=False)  # 768 float32 coefs + 1 bias
 
 
 class CollectLog(Base):

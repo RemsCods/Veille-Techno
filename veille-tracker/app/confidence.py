@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 import numpy as np
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from config import settings
 from models import Article, Embedding, Corroboration, FactCheck
@@ -36,6 +37,11 @@ def _get_vec_cache(db: Session) -> list:
                 Embedding.vec_data,
             )
             .join(Article, Article.id == Embedding.article_id)
+            # Off-topic articles must not corroborate anything
+            # (spam corroborating spam would inflate confidence scores).
+            # Filter on relevance, not status: backfilled legacy spam keeps
+            # status='score' but carries relevance='off_topic'.
+            .filter(or_(Article.relevance.is_(None), Article.relevance != "off_topic"))
             .all()
         )
         _vec_cache = [
@@ -246,24 +252,40 @@ def score_fact_check(article: Article, db: Session) -> float:
     return max(round(effective / len(verifiable) * 100, 1), 35.0)
 
 
-def score_freshness(article: Article) -> float:
+def score_recency(article: Article) -> float:
+    """Pure recency: how fresh is the publication date."""
+    if not article.published_at:
+        return 0.0
+    age = (datetime.utcnow() - article.published_at).total_seconds() / 3600
+    if age < 24:
+        return 100.0
+    if age < 72:
+        return 60.0
+    if age < 168:
+        return 25.0
+    return 0.0
+
+
+def score_completeness(article: Article) -> float:
+    """Metadata completeness: identified author + substantial content."""
     score = 0.0
-    if article.published_at:
-        age = (datetime.utcnow() - article.published_at).total_seconds() / 3600
-        if age < 24:
-            score += 40
-        elif age < 72:
-            score += 25
-        elif age < 168:
-            score += 10
     if article.author:
-        score += 20
+        score += 40
     content_len = len(article.content or article.summary or "")
     if content_len > 500:
-        score += 25
+        score += 60
     elif content_len > 100:
-        score += 10
-    return min(score, 100.0)
+        score += 25
+    return score
+
+
+def score_freshness(article: Article) -> float:
+    """
+    Freshness component of the confidence index.
+    Average of recency and completeness — previously both were mixed in a
+    single opaque sum whose real maximum was 85/100.
+    """
+    return round((score_recency(article) + score_completeness(article)) / 2, 1)
 
 
 def score_corroboration_from_stored(article: Article) -> float:

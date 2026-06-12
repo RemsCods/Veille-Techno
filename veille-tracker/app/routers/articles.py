@@ -6,9 +6,13 @@ from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import get_db
-from models import Article, Corroboration, Source, Tag
-from schemas import ArticleOut, ArticleDetail, ScoreBreakdownOut
-from confidence import score_source, score_freshness, score_corroboration_from_stored, score_fact_check_from_stored
+from models import Article, Corroboration, Feedback, Source, Tag
+from schemas import ArticleOut, ArticleDetail, FeedbackCreate, ScoreBreakdownOut
+from relevance import bucket_from_margin
+from confidence import (
+    score_source, score_freshness, score_recency, score_completeness,
+    score_corroboration_from_stored, score_fact_check_from_stored,
+)
 
 router = APIRouter(prefix="/articles", tags=["articles"])
 
@@ -27,10 +31,13 @@ def list_articles(
     from_date: Optional[datetime] = None,
     search: Optional[str] = None,
     deduplicate: bool = True,              # hide cluster duplicates by default
+    relevance: Optional[Literal["on_topic", "borderline", "off_topic"]] = None,
+    show_off_topic: bool = False,          # off-topic hidden by default (kept in DB)
     limit: int = Query(default=50, le=200),
     offset: int = 0,
     sort_by: Literal[
-        "collected_at", "confidence_score", "source_reliability", "corroborations"
+        "collected_at", "confidence_score", "source_reliability", "corroborations",
+        "relevance_score", "uncertainty",
     ] = "collected_at",
     sort_dir: Literal["asc", "desc"] = "desc",
     db: Session = Depends(get_db),
@@ -40,6 +47,13 @@ def list_articles(
     # Deduplication: only show canonical articles (canonical_id IS NULL)
     if deduplicate:
         q = q.filter(Article.canonical_id.is_(None))
+
+    # Relevance: hide off_topic by default. NULL relevance (not yet gated)
+    # stays visible — never silently drop unclassified articles.
+    if relevance is not None:
+        q = q.filter(Article.relevance == relevance)
+    elif not show_off_topic:
+        q = q.filter(or_(Article.relevance.is_(None), Article.relevance != "off_topic"))
 
     # Filters
     if source:
@@ -93,6 +107,27 @@ def list_articles(
              .order_by(corr_count.desc() if sort_dir == "desc" else corr_count.asc(), secondary)
         )
 
+    elif sort_by == "relevance_score":
+        col = Article.relevance_score
+        if sort_dir == "desc":
+            q = q.order_by(col.desc(), secondary)
+        else:
+            q = q.order_by(func.isnull(col), col.asc(), secondary)
+
+    elif sort_by == "uncertainty":
+        # Active-learning review queue: articles the classifier (or, before any
+        # model exists, the anchor margin) is least sure about, unlabeled first.
+        # 50 = neutral → sort by |score − 50| ascending.
+        from models import Feedback as _Feedback
+        q = (
+            q.outerjoin(_Feedback, _Feedback.article_id == Article.id)
+             .filter(_Feedback.article_id.is_(None))           # not yet labeled
+             .order_by(
+                 func.abs(func.coalesce(Article.ml_relevance, Article.relevance_score, 50) - 50).asc(),
+                 secondary,
+             )
+        )
+
     else:  # collected_at — NOT NULL, default
         col = Article.collected_at
         order = col.desc() if sort_dir == "desc" else col.asc()
@@ -115,6 +150,58 @@ def popular_tags(limit: int = Query(default=30, le=100), db: Session = Depends(g
     return [{"name": r[0], "count": r[1]} for r in rows]
 
 
+@router.put("/{article_id}/feedback", response_model=ArticleOut)
+def set_feedback(article_id: int, payload: FeedbackCreate, db: Session = Depends(get_db)):
+    """
+    Human relevance verdict (👍 pertinent / 👎 non pertinent).
+    Takes effect immediately on the article's relevance bucket — the human
+    always wins over the gate and the LLM. Also feeds the active-learning
+    training set (workers/learner.py).
+    """
+    if payload.verdict not in ("pertinent", "non_pertinent"):
+        raise HTTPException(422, "verdict must be 'pertinent' or 'non_pertinent'")
+    article = db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "Article not found")
+
+    fb = db.get(Feedback, article_id)
+    if fb:
+        fb.verdict = payload.verdict
+    else:
+        db.add(Feedback(article_id=article_id, verdict=payload.verdict))
+
+    if payload.verdict == "non_pertinent":
+        article.relevance = "off_topic"
+        article.relevance_reason = "feedback humain (👎 non pertinent)"
+    else:
+        article.relevance = "on_topic"
+        article.relevance_reason = "feedback humain (👍 pertinent)"
+    db.commit()
+    db.refresh(article)
+    return article
+
+
+@router.delete("/{article_id}/feedback", response_model=ArticleOut)
+def remove_feedback(article_id: int, db: Session = Depends(get_db)):
+    """Undo a human verdict — the bucket is recomputed from the stored margin."""
+    article = db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "Article not found")
+    fb = db.get(Feedback, article_id)
+    if fb:
+        db.delete(fb)
+    if article.relevance_score is not None:
+        margin = (article.relevance_score - 50) / 250
+        article.relevance = bucket_from_margin(margin)
+        article.relevance_reason = f"recalculé après retrait du feedback (marge {margin:+.2f})"
+    else:
+        article.relevance = None
+        article.relevance_reason = None
+    db.commit()
+    db.refresh(article)
+    return article
+
+
 @router.get("/{article_id}", response_model=ArticleDetail)
 def get_article(article_id: int, db: Session = Depends(get_db)):
     article = db.get(Article, article_id)
@@ -128,5 +215,7 @@ def get_article(article_id: int, db: Session = Depends(get_db)):
             corroboration=score_corroboration_from_stored(article),
             fact_check=score_fact_check_from_stored(article),
             freshness=score_freshness(article),
+            recency=score_recency(article),
+            completeness=score_completeness(article),
         )
     return result

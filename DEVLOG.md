@@ -941,33 +941,118 @@ Le bouton "API docs" dans l'en-tête du site pointait vers `/docs` (Swagger Fast
 
 ---
 
-## État du projet — juin 2026
+## Session 16 — 12 juin 2026 : Refonte de la pertinence (gate contrastif + active learning)
 
-### Git log
+> Suivi d'implémentation détaillé : `PLAN.md` à la racine du repo.
+
+### Le problème
+
+Le système ne mesurait que la **confiance** (peut-on se fier à l'article ?), jamais la
+**pertinence** (est-ce dans le périmètre de veille ?). Audit de la base (4 568 articles) :
+~50 % de spam pur dans Dev.to AI (628 articles, 3ᵉ source) — *« Buy Verified PayPal
+Accounts »* scoré 44.5, *« Thai New York Spa »* 57.5… Chaque article hors-sujet brûlait
+3 appels LLM (1 enrich + 2 fact-check) et apparaissait dans le feed avec un score moyen.
+
+### L'architecture retenue : 3 signaux successifs, zéro VRAM en plus
+
+**Nouveau flux pipeline** (statuts ajoutés : `pertinent`, `hors_sujet`) :
+
 ```
-fafb29c  docs: fix documentation — 1 secondary LLM, cron vs thread, positional comparison
-70112a4  feat: documentation page with TOC, pipeline, scoring formula, dual LLM, clusters
-fee0da1  fix: dual LLM fact-check — KeyError on prompt + wrong secondary model
-45a6882  docs: DEVLOG session 14 — dual LLM, tag norm, cluster dedup + recalibration proposal
-0477b5c  feat: data quality improvements — dual LLM, tag norm, cluster dedup, tag chips
-edd506e  chore: initial commit — veille-techno v1.0 (sessions 1-13)
+collecte → [gate embeddings] → pertinent → enrichi → score
+                  │
+                  └→ hors_sujet  (conservé en base, masqué du feed, jamais enrichi)
 ```
 
-### Fonctionnalités en production
-- ✅ Collecte automatique (19 sources, RSS + arXiv + HN)
-- ✅ Pipeline continu : enrichissement (qwen3.5) → embedding (nomic) → scoring → clustering
-- ✅ Dual LLM fact-check (qwen3.5 primaire + llama3.2 secondaire)
-- ✅ Score de confiance 4 composantes (source × corroboration × fact-check × freshness)
-- ✅ Déduplication sémantique par cluster + badge "N similar"
-- ✅ Normalisation des tags (354 nettoyés, synonymes AI)
-- ✅ Feed : recherche full-text + chips tags multi-select + filtres + tri
-- ✅ Admin : monitoring pipeline, sparklines, gestion sources, logs erreurs 24h
-- ✅ Page documentation interne (pipeline, formules, dual LLM, API)
-- ✅ Git avec commits par session
+**Signal 1 — Gate par ancres contrastives** (avant tout LLM) :
+`marge = max_cos(ancres positives) − max_cos(ancres négatives)`.
+10 ancres positives (le sujet de veille) + 8 négatives (le bruit observé : vente de
+comptes, casino, spa, affiliation…) — table `topic_anchors`, éditable dans l'Admin.
+Seuils mesurés : marge < −0.12 → off_topic · ≥ +0.05 → on_topic · entre → borderline.
 
-### En attente de validation
-- ⏳ Recalibrage automatique de la reliability des sources (proposition en session 14)
+**Signal 2 — Verdict LLM gratuit** : le prompt d'enrichissement (déjà payé) retourne
+en plus `relevance` + une raison. Fusion : le LLM tranche les borderline ; en cas de
+désaccord fort (gate dit on_topic, LLM dit off_topic) → borderline affiché, jamais
+de drop silencieux.
+
+**Signal 3 — Feedback humain + active learning** : boutons 👍/👎 (effet immédiat,
+l'humain gagne toujours) + régression logistique **numpy pur** (pas de scikit-learn,
+CPU, ms) sur les embeddings 768d → `ml_relevance`. Mode feed « 🎯 À trier » =
+uncertainty sampling (articles à ~50 % de proba d'abord). Retrain horaire automatique
+si nouveaux votes (min 10/classe), ou bouton dans l'Admin.
+
+### La leçon de calibration (à mettre dans le rapport !)
+
+**Hypothèse v1 (fausse)** : seuil absolu de cosinus vs ancres positives.
+Mesure sur les 4 568 articles : l'espace cosinus de nomic est compressé (0.39–0.82),
+le spam PayPal score 0.55 = **en plein milieu** de la distribution légitime, et les
+pires scores absolus étaient… des articles légitimes en chinois/vietnamien.
+
+**Pivot v2 (validé)** : la marge contrastive sépare proprement — tout le spam connu
+< −0.12 (moyenne −0.13), tout le légitime observé > −0.10 (pire cas légitime :
+*« How to get started with Codex »* à −0.072). Démarche hypothèse → mesure → pivot
+documentée dans `scripts/calibrate_relevance.py` (v1) et
+`scripts/calibrate_v2_contrastive.py` (v2).
+
+**Backfill du corpus existant** : 4 580/4 580 articles classés —
+**3 632 on_topic (79.3 %) · 907 borderline (19.8 %) · 41 off_topic (0.9 %)**.
+Coupe volontairement conservatrice (faux négatif > faux positif) : seul le spam
+flagrant est masqué, le borderline reste visible avec badge.
+
+### Aussi dans cette session
+
+- **Fix bug admin signalé** : « err/min » affiché dans la section score sans aucune
+  erreur visible nulle part. Cause : les workers avalaient les exceptions
+  (`except Exception: pass`) et seul un taux glissant 60 s était exposé — une rafale
+  d'erreurs disparaissait sans trace. Fix : ring buffer des 50 dernières erreurs
+  (étape, article, message, horodatage) + compteurs cumulés + panneau dépliable
+  dans l'Admin.
+- **Fix filtre HN** : matching par sous-chaîne → regex frontières de mots
+  (« gpt » matchait *Egypt*, « llm » matchait *Wellman*).
+- **Freshness scindée** : récence (date) et complétude (auteur, longueur) séparées —
+  l'ancienne somme opaque plafonnait à 85/100 réels. Breakdown 6 lignes dans le détail.
+- **Corroboration** : les off_topic sont exclus du cache vectoriel (le spam ne doit
+  pas corroborer le spam).
+- **Frontend** : badges pertinence, 👍/👎 sur chaque carte, toggle « Show off-topic »,
+  mode « À trier », section pertinence dans le détail article, Admin enrichi
+  (funnel 6 statuts, répartition pertinence, appels LLM économisés, gestion des
+  ancres, carte ML avec retrain).
+- **Docs** : encart « le système en 30 secondes », section Pertinence complète,
+  tableau « comment lire le feed », API à jour. README + PLAN.md à jour.
+- **Migrations** : `001_relevance.sql` + `002_contrastive_anchors.sql` appliquées
+  après backup (`db/backups/pre_relevance_20260612.sql.gz`).
+
+### VRAM (contrainte 16 Go respectée)
+
+Aucun nouveau modèle : qwen3.5:9b + llama3.2:3b + nomic-embed-text inchangés.
+Le gate réutilise nomic (déjà chargé), la logreg tourne sur CPU. Le gate **économise**
+du GPU : chaque article stoppé = 3 appels LLM évités.
 
 ---
 
-*Dernière mise à jour : juin 2026*
+## État du projet — juin 2026 (après session 16)
+
+### Fonctionnalités en production
+- ✅ Collecte automatique (19 sources, RSS + arXiv + HN) — filtre HN corrigé (word boundaries)
+- ✅ **Gate de pertinence contrastif** (ancres ± éditables, seuils calibrés sur corpus réel)
+- ✅ Pipeline continu : gate (nomic) → enrichissement (qwen3.5, prompt v2 avec verdict
+  pertinence) → scoring → clustering
+- ✅ Dual LLM fact-check (qwen3.5 primaire + llama3.2 secondaire)
+- ✅ Score de confiance 4 composantes — freshness scindée récence/complétude
+- ✅ **Pertinence : axe orthogonal à la confiance** (badge, filtres, hors-sujet masqué
+  mais conservé)
+- ✅ **Active learning** : 👍/👎 + logreg numpy + file « À trier » (uncertainty sampling)
+  + retrain horaire
+- ✅ Déduplication sémantique par cluster + badge "N similar"
+- ✅ Feed : recherche + chips tags + filtres + tri (dont pertinence et incertitude)
+- ✅ Admin : monitoring pipeline (6 statuts), **erreurs pipeline détaillées**, répartition
+  pertinence, gestion des ancres, carte ML, sparklines, gestion sources
+- ✅ Page documentation interne refaite user-friendly (résumé 30 s, section pertinence)
+- ✅ PLAN.md : suivi d'implémentation reprenable inter-sessions
+
+### En attente de validation
+- ⏳ Recalibrage automatique de la reliability des sources (proposition en session 14)
+- ⏳ Étoffer les votes 👍/👎 pour muscler le classifieur ML (10 min/classe pour le 1ᵉʳ train)
+
+---
+
+*Dernière mise à jour : 12 juin 2026*

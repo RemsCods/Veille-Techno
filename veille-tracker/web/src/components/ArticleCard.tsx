@@ -1,6 +1,8 @@
 import { Link } from "react-router-dom";
 import type { Article } from "../types";
 import ConfidenceBadge from "./ConfidenceBadge";
+import RelevanceBadge from "./RelevanceBadge";
+import FeedbackButtons from "./FeedbackButtons";
 
 interface Props {
   article: Article;
@@ -15,7 +17,7 @@ function fmtDate(iso: string | null) {
 
 export default function ArticleCard({ article }: Props) {
   return (
-    <article className="border border-gray-800 rounded-lg p-4 hover:border-gray-600 transition-colors">
+    <article className="border border-gray-800 rounded-lg p-4 hover:border-gray-600 hover:bg-gray-900/30 transition-all">
       <div className="flex items-start justify-between gap-3">
         <Link
           to={`/articles/${article.id}`}
@@ -23,7 +25,10 @@ export default function ArticleCard({ article }: Props) {
         >
           {article.title}
         </Link>
-        <ConfidenceBadge score={article.confidence_score} />
+        <span className="flex items-center gap-1.5 flex-shrink-0">
+          <RelevanceBadge relevance={article.relevance} reason={article.relevance_reason} />
+          <ConfidenceBadge score={article.confidence_score} />
+        </span>
       </div>
 
       {article.summary && (
@@ -62,14 +67,17 @@ export default function ArticleCard({ article }: Props) {
           </span>
         )}
 
-        <a
-          href={article.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="ml-auto text-gray-600 hover:text-gray-400"
-        >
-          source ↗
-        </a>
+        <span className="ml-auto flex items-center gap-2">
+          <FeedbackButtons articleId={article.id} verdict={article.feedback?.verdict ?? null} />
+          <a
+            href={article.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-gray-600 hover:text-gray-400"
+          >
+            source ↗
+          </a>
+        </span>
       </div>
     </article>
   );

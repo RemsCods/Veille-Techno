@@ -48,9 +48,9 @@ def run_scorer(batch: int = 25) -> int:
                 db.commit()
                 count += 1
                 _stats.record_scored()
-            except Exception:
+            except Exception as exc:
                 db.rollback()
-                _stats.record_score_error()
+                _stats.record_score_error(article_id, f"{type(exc).__name__}: {exc}")
     finally:
         _stats.adjust_scoring_active(-len(ids))
         with _claim_lock:
