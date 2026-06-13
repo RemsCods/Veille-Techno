@@ -32,7 +32,17 @@ class Settings(BaseSettings):
     arxiv_collect_interval: str = "0 */2 * * *"
 
     corroboration_window_hours: int = 72
-    corroboration_cosine_threshold: float = 0.85
+    # Calibrated for nomic-embed-text's COMPRESSED cosine space (measured 2026-06-14):
+    # same-story article pairs sit at ~0.70–0.85 (median 0.69, max 0.85), while random
+    # different-topic AI pairs stay below ~0.72 (p99). 0.85 was above the real max of
+    # near-duplicates → corroboration never fired. 0.78 separates same-story from same-topic
+    # without over-clustering (calibrated on the live corpus: ~36% reliable, clean 3-tier spread).
+    corroboration_cosine_threshold: float = 0.78
+    # Clustering (feed dedup) is STRICTER than corroboration scoring: at 0.78 the
+    # transitive closure chained same-topic/same-style articles into mega-clusters
+    # (a 360-article OpenAI blob). Fuse only near-duplicates so the feed stays intact;
+    # corroboration scoring still uses the looser 0.78 above.
+    cluster_cosine_threshold: float = 0.88
     reliability_threshold: int = 70
 
     # Relevance gate thresholds on the CONTRASTIVE MARGIN
@@ -48,6 +58,7 @@ class Settings(BaseSettings):
     # small flow of legacy scored articles to re-enrich + re-score them.
     review_enabled: bool = True
     review_batch: int = 8     # articles re-injected per idle cycle (self-throttled — only runs when idle)
+    review_cooldown_minutes: int = 5   # re-review also pauses while a collection ran this recently (give fresh a clear runway)
 
     @property
     def database_url(self) -> str:

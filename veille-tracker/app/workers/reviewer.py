@@ -27,10 +27,10 @@ Self-throttling: re-injecting makes the pipeline non-idle on the next loop
 As soon as a real collection arrives, the reviewer pauses on its own.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from database import SessionLocal
 from models import Article
-from config import CURRENT_PIPELINE_VERSION
+from config import CURRENT_PIPELINE_VERSION, settings
 from pipeline_stats import stats as _stats
 
 
@@ -56,6 +56,14 @@ def run_reviewer(batch: int = 8) -> int:
         )
         if fresh_pending:
             return 0
+
+        # Also yield for a short window after any collection: sources are pulled
+        # gradually (one after another), so this keeps re-review fully out of the
+        # way during a pull instead of slipping 8 in between sources.
+        if settings.review_cooldown_minutes > 0:
+            cutoff = datetime.utcnow() - timedelta(minutes=settings.review_cooldown_minutes)
+            if db.query(Article.id).filter(Article.collected_at > cutoff).first():
+                return 0
 
         ids = [
             r[0]

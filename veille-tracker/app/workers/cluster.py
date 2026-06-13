@@ -17,6 +17,7 @@ because it rechecks and may only update if a better canonical appeared.
 
 from sqlalchemy import text
 from database import SessionLocal
+from config import settings
 
 
 def run_cluster(batch: int = 100) -> int:
@@ -30,14 +31,19 @@ def run_cluster(batch: int = 100) -> int:
         # Find scored articles that appear in any corroboration row (either side)
         # and haven't been assigned to a cluster yet (canonical_id IS NULL and cluster_size = 1)
         # We only reprocess articles with cluster_size = 1 to avoid re-clustering every cycle.
+        # Only near-duplicate pairs (similarity >= cluster threshold) drive the
+        # feed dedup — looser corroboration pairs (>=0.78) count for SCORING but
+        # would chain unrelated same-topic articles into mega-clusters.
+        ct = settings.cluster_cosine_threshold
         rows = db.execute(text("""
             SELECT DISTINCT a.id
             FROM articles a
             JOIN corroborations c ON (c.article_id = a.id OR c.similar_article_id = a.id)
             WHERE a.status = 'score'
               AND a.cluster_size = 1
+              AND c.similarity_score >= :ct
             LIMIT :batch
-        """), {"batch": batch}).fetchall()
+        """), {"batch": batch, "ct": ct}).fetchall()
 
         article_ids = [r[0] for r in rows]
 
@@ -61,15 +67,17 @@ def _cluster_article(article_id: int, db) -> bool:
 
     Returns True if any change was made.
     """
-    # ── Collect all IDs in this cluster (transitive corroborations, depth 1) ──
+    ct = settings.cluster_cosine_threshold
+    # ── Collect all IDs in this cluster (near-duplicate corroborations only) ──
     rows = db.execute(text("""
         SELECT article_id, similar_article_id
         FROM corroborations
-        WHERE article_id = :id OR similar_article_id = :id
-    """), {"id": article_id}).fetchall()
+        WHERE (article_id = :id OR similar_article_id = :id)
+          AND similarity_score >= :ct
+    """), {"id": article_id, "ct": ct}).fetchall()
 
     if not rows:
-        return False  # no corroborations yet
+        return False  # no near-duplicate corroborations
 
     cluster_ids: set[int] = {article_id}
     for r in rows:
@@ -82,8 +90,9 @@ def _cluster_article(article_id: int, db) -> bool:
         extra = db.execute(text("""
             SELECT article_id, similar_article_id
             FROM corroborations
-            WHERE article_id = :id OR similar_article_id = :id
-        """), {"id": mid}).fetchall()
+            WHERE (article_id = :id OR similar_article_id = :id)
+              AND similarity_score >= :ct
+        """), {"id": mid, "ct": ct}).fetchall()
         for r in extra:
             cluster_ids.add(r[0])
             cluster_ids.add(r[1])

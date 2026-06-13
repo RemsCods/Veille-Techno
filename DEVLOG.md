@@ -1162,7 +1162,45 @@ les re-injectés (même file `pertinent`/`enrichi`, sans ordre). Correctifs :
 
 ---
 
-## État du projet — juin 2026 (après session 19)
+## Session 20 — 14 juin 2026 : Seuil de corroboration + re-review en arrière-plan
+
+### Problème 1 — la corroboration ne se déclenchait jamais (seuil)
+Constat utilisateur : ~10 articles sur le même évènement (Fable/Mythos coupés par le gouv. US)
+ne fusionnaient pas et restaient à 46–66. Mesure : l'espace cosinus de nomic est **compressé** —
+paires même-évènement médiane **0,687**, max **0,851** (1 seule /45 ≥ 0,85) ; paires aléatoires
+p99 = **0,717**. Le seuil `corroboration_cosine_threshold` était à **0,85**, au-dessus du max réel
+des quasi-doublons → 0 corroboration → 0 fusion → scores tassés.
+
+Fix : seuil **0,78** (calibré ; sépare même-histoire de même-thème sans sur-fusionner). Le seuil
+est lu depuis `.env` (qui surchargeait `config.py` — il fallait modifier le `.env` live, pas que
+le défaut). `scripts/rescore_confidence.py` étendu : en mode apply il **persiste** les lignes
+`corroborations` (via `score_corroboration`) puis `cluster.py` fusionne. Comparatif mesuré
+(4 922 articles) : fiables ≥70 à 0.85 **672** → 0.78 **1 795** ; 0.75 donnait 2 691 (55 %, jugé
+trop généreux). Spread restauré : 40-60 **2035** · 60-80 **2347** · 80-100 **539**.
+
+**Sur-clustering découvert + corrigé.** Le seuil 0.78 partagé avec le clustering a chaîné par
+transitivité des articles **même-thème** (pas même-histoire) en **méga-clusters** (le plus gros :
+360 articles OpenAI : GPT-4, GPT-4o, GPT-5, HealthBench…), ce qui aurait vidé le feed. Mesure :
+les paires Fable inter-sources sont à **0,79–0,81**, dans la même plage que les 8 161 paires
+0,78–0,80 responsables des méga-clusters → **les embeddings ne séparent pas « même évènement » de
+« même sujet »**. Décision : **découpler** — nouveau `cluster_cosine_threshold = 0.88` (dédup des
+quasi-doublons/reposts uniquement) distinct de `corroboration_cosine_threshold = 0.78` (scoring).
+`cluster.py` filtre les corroborations par `similarity_score >= 0.88`. Après reset + re-cluster :
+max cluster **6** (au lieu de 360), feed intact. Conséquence assumée : les articles même-évènement
+mais rédigés différemment (Fable) ne *fusionnent* pas (ce ne sont pas des doublons) mais portent
+désormais un **score** de corroboration élevé (50–77) — c'est le signal correct.
+
+### Problème 2 — la re-review s'intercalait pendant la collecte
+La priorité (claim `ORDER BY reviewed_at ASC` + yield si frais dans le funnel, session 19) est
+correcte, mais la collecte étant graduelle (sources séquentielles), la re-review s'glissait dans
+les trous. Ajout d'un **cooldown** (`review_cooldown_minutes`, défaut 5) : le reviewer cède aussi
+si un article a été collecté très récemment → chaque pull a une piste dégagée. Rappel : le débit
+(~8/min) est le plafond Ollama (~2 contextes //), pas une limite de batch ; les frais prennent
+déjà 75 par claim en priorité.
+
+---
+
+## État du projet — juin 2026 (après session 20)
 
 ### Fonctionnalités en production
 - ✅ Collecte automatique (~24 sources, RSS + arXiv + HN) — filtre HN corrigé (word boundaries)

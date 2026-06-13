@@ -25,7 +25,8 @@ from models import Article
 from config import settings
 from ollama_client import bytes_to_vector
 from confidence import (
-    score_source, score_fact_check_from_stored, score_freshness, _get_vec_cache,
+    score_source, score_corroboration, score_fact_check_from_stored,
+    score_freshness, _get_vec_cache,
 )
 
 
@@ -65,6 +66,16 @@ def _buckets(scores):
     return b
 
 
+def _score(a, s_corr):
+    return round(
+        0.40 * score_source(a)
+        + 0.30 * s_corr
+        + 0.20 * score_fact_check_from_stored(a)
+        + 0.10 * score_freshness(a),
+        1,
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -75,52 +86,43 @@ def main():
     try:
         cache = _get_vec_cache(db)
         ids = [r[0] for r in db.execute(text("SELECT id FROM articles WHERE status='score'")).fetchall()]
-        print(f"Re-scoring {len(ids)} articles · corroboration window ±{settings.corroboration_window_hours}h "
-              f"· {'DRY RUN' if args.dry_run else 'APPLY'}")
+        db.rollback()  # end read snapshot
+        print(f"Re-scoring {len(ids)} articles · corroboration ±{settings.corroboration_window_hours}h "
+              f"@ cosine>={settings.corroboration_cosine_threshold} · {'DRY RUN' if args.dry_run else 'APPLY'}")
 
-        old_scores, new_scores, updates = [], [], []
+        old_scores, new_scores = [], []
+        applied = 0
         for aid in ids:
-            a = db.get(Article, aid)
-            if not a:
-                continue
-            old = a.confidence_score or 0.0
-            new = round(
-                0.40 * score_source(a)
-                + 0.30 * _corr_score(a, cache, window_s)
-                + 0.20 * score_fact_check_from_stored(a)
-                + 0.10 * score_freshness(a),
-                1,
-            )
-            old_scores.append(old)
-            new_scores.append(new)
-            updates.append((aid, new))
-            db.expunge(a)   # detach so the (large) content can be GC'd
-        db.rollback()       # end the read snapshot before the write phase
+            try:
+                a = db.get(Article, aid)
+                if not a:
+                    continue
+                old_scores.append(a.confidence_score or 0.0)
+                if args.dry_run:
+                    new = _score(a, _corr_score(a, cache, window_s))   # read-only preview
+                else:
+                    # score_corroboration recomputes AND persists corroboration rows
+                    # (so cluster.py can then fuse same-story articles), then commits.
+                    new = _score(a, score_corroboration(a, db))
+                    a.confidence_score = new
+                    db.commit()
+                    applied += 1
+                new_scores.append(new)
+                db.expunge(a)
+            except Exception as exc:
+                db.rollback()
+                print(f"  article {aid} skipped: {type(exc).__name__}: {exc}")
+            if not args.dry_run and applied and applied % 500 == 0:
+                print(f"  …{applied} applied")
 
         print(f"BEFORE: {_buckets(old_scores)}")
         print(f"AFTER : {_buckets(new_scores)}")
         print(f"reliable (>=70): {sum(s >= 70 for s in old_scores)} -> {sum(s >= 70 for s in new_scores)}")
-        if old_scores:
+        if new_scores:
             print(f"avg {sum(old_scores)/len(old_scores):.1f} -> {sum(new_scores)/len(new_scores):.1f} · "
                   f"min {min(old_scores):.1f}->{min(new_scores):.1f} · max {max(old_scores):.1f}->{max(new_scores):.1f}")
-
         if not args.dry_run:
-            applied = 0
-            for i in range(0, len(updates), 200):
-                chunk = updates[i:i + 200]
-                for attempt in (1, 2, 3):
-                    try:
-                        for aid, s in chunk:
-                            db.execute(text("UPDATE articles SET confidence_score = :s WHERE id = :id"),
-                                       {"s": s, "id": aid})
-                        db.commit()
-                        applied += len(chunk)
-                        break
-                    except Exception as exc:
-                        db.rollback()
-                        if attempt == 3:
-                            print(f"  chunk {i} failed after 3 attempts: {exc}")
-            print(f"Applied {applied}/{len(updates)} updates.")
+            print(f"Applied {applied}/{len(ids)} (corroboration rows persisted → cluster worker will fuse).")
     finally:
         db.close()
 
