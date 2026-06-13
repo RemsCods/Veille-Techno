@@ -97,6 +97,183 @@ function Tldr({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Architecture diagram — proper SVG (ASCII renders unevenly in proportional fonts). */
+function ArchitectureDiagram() {
+  return (
+    <div className="mb-5 rounded-lg border border-gray-800 bg-gray-950/40 p-4">
+      <svg
+        viewBox="0 0 720 880"
+        className="block w-full h-auto"
+        style={{ maxWidth: "720px", margin: "0 auto" }}
+        role="img"
+        aria-label="Architecture du système de veille — pipeline complet"
+      >
+        <defs>
+          <marker id="ar-indigo" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="#6366f1"/>
+          </marker>
+          <marker id="ar-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+          </marker>
+          <marker id="ar-emerald" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="#10b981"/>
+          </marker>
+          <marker id="ar-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="#a855f7"/>
+          </marker>
+        </defs>
+
+        {/* ── SOURCES ── */}
+        <rect x="260" y="14" width="200" height="46" rx="6" fill="#111827" stroke="#4b5563" strokeWidth="1.2"/>
+        <text x="360" y="34" textAnchor="middle" fill="#e5e7eb" fontSize="13" fontWeight="600">SOURCES</text>
+        <text x="360" y="50" textAnchor="middle" fill="#9ca3af" fontSize="10">17 sources · RSS · API · Hacker News</text>
+
+        <line x1="360" y1="60" x2="360" y2="94" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+        <text x="367" y="80" fill="#6b7280" fontSize="10">collecteurs · cron APScheduler</text>
+
+        {/* ── MariaDB ── */}
+        <rect x="110" y="98" width="500" height="86" rx="6" fill="#111827" stroke="#4b5563" strokeWidth="1.2"/>
+        <text x="360" y="120" textAnchor="middle" fill="#e5e7eb" fontSize="13" fontWeight="600">MariaDB 11</text>
+        <text x="360" y="135" textAnchor="middle" fill="#6b7280" fontSize="10" fontStyle="italic">état du pipeline</text>
+        <text x="360" y="156" textAnchor="middle" fill="#9ca3af" fontSize="10.5" fontFamily="ui-monospace, monospace">articles · embeddings · corroborations · fact_checks</text>
+        <text x="360" y="172" textAnchor="middle" fill="#9ca3af" fontSize="10.5" fontFamily="ui-monospace, monospace">topic_anchors · feedback · ml_models · tags · sources</text>
+
+        <line x1="360" y1="184" x2="360" y2="218" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+        <text x="367" y="204" fill="#6b7280" fontSize="10">pipeline continu (thread polling)</text>
+
+        {/* ── PIPELINE container ── */}
+        <rect x="30" y="222" width="660" height="400" rx="10" fill="#0a0e16" stroke="#1f2937" strokeWidth="1.2" strokeDasharray="2 4"/>
+        <text x="50" y="242" fill="#6366f1" fontSize="11" fontWeight="600" letterSpacing="0.05em">PIPELINE CONTINU · 5 workers en parallèle</text>
+
+        {/* status: collecte */}
+        <rect x="105" y="258" width="90" height="24" rx="12" fill="#1f2937" stroke="#374151" strokeWidth="1"/>
+        <text x="150" y="274" textAnchor="middle" fill="#d1d5db" fontSize="11" fontFamily="ui-monospace, monospace">collecte</text>
+
+        <line x1="150" y1="282" x2="150" y2="300" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+
+        {/* ① GATE */}
+        <rect x="60" y="302" width="380" height="50" rx="6" fill="#111827" stroke="#6366f1" strokeWidth="1.5"/>
+        <text x="250" y="322" textAnchor="middle" fill="#e5e7eb" fontSize="12" fontWeight="600">① GATE PERTINENCE</text>
+        <text x="250" y="340" textAnchor="middle" fill="#9ca3af" fontSize="10">nomic-embed-text + ancres ± (positive / negative)</text>
+
+        {/* GATE → hors_sujet branch */}
+        <line x1="440" y1="325" x2="478" y2="325" stroke="#dc2626" strokeWidth="1.5" markerEnd="url(#ar-red)"/>
+        <text x="446" y="318" fill="#dc2626" fontSize="9">marge &lt; t_low</text>
+
+        {/* hors_sujet box */}
+        <rect x="480" y="304" width="170" height="42" rx="6" fill="#1f1115" stroke="#7f1d1d" strokeWidth="1.2"/>
+        <text x="565" y="320" textAnchor="middle" fill="#fca5a5" fontSize="11" fontWeight="600">hors_sujet</text>
+        <text x="565" y="335" textAnchor="middle" fill="#fca5a5" fontSize="9" opacity="0.75">terminal · masqué du feed</text>
+
+        {/* GATE → pertinent */}
+        <line x1="150" y1="352" x2="150" y2="372" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+        <text x="158" y="368" fill="#6b7280" fontSize="9">marge ≥ t_low</text>
+
+        {/* pertinent pill */}
+        <rect x="105" y="372" width="90" height="24" rx="12" fill="#1f1b3a" stroke="#4338ca" strokeWidth="1"/>
+        <text x="150" y="388" textAnchor="middle" fill="#c7d2fe" fontSize="11" fontFamily="ui-monospace, monospace">pertinent</text>
+
+        <line x1="150" y1="396" x2="150" y2="412" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+
+        {/* ② ENRICHEUR */}
+        <rect x="60" y="414" width="380" height="42" rx="6" fill="#111827" stroke="#374151" strokeWidth="1.2"/>
+        <text x="250" y="432" textAnchor="middle" fill="#e5e7eb" fontSize="12" fontWeight="600">② ENRICHEUR (qwen3.5:9b)</text>
+        <text x="250" y="448" textAnchor="middle" fill="#9ca3af" fontSize="10">résumé · tags · verdict pertinence</text>
+
+        <line x1="150" y1="456" x2="150" y2="472" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+
+        {/* enrichi pill */}
+        <rect x="105" y="472" width="90" height="24" rx="12" fill="#172a3a" stroke="#1e40af" strokeWidth="1"/>
+        <text x="150" y="488" textAnchor="middle" fill="#93c5fd" fontSize="11" fontFamily="ui-monospace, monospace">enrichi</text>
+
+        <line x1="150" y1="496" x2="150" y2="512" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+
+        {/* ③ SCORER */}
+        <rect x="60" y="514" width="380" height="42" rx="6" fill="#111827" stroke="#374151" strokeWidth="1.2"/>
+        <text x="250" y="532" textAnchor="middle" fill="#e5e7eb" fontSize="12" fontWeight="600">③ SCORER (qwen3.5 + llama3.2)</text>
+        <text x="250" y="548" textAnchor="middle" fill="#9ca3af" fontSize="10">corroboration · fact-check dual · fraîcheur</text>
+
+        <line x1="150" y1="556" x2="150" y2="572" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+
+        {/* score pill */}
+        <rect x="105" y="572" width="90" height="24" rx="12" fill="#14271d" stroke="#15803d" strokeWidth="1"/>
+        <text x="150" y="588" textAnchor="middle" fill="#86efac" fontSize="11" fontFamily="ui-monospace, monospace">score</text>
+
+        {/* score → CLUSTER */}
+        <line x1="198" y1="584" x2="475" y2="584" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+
+        {/* ④ CLUSTER */}
+        <rect x="478" y="566" width="172" height="40" rx="6" fill="#111827" stroke="#374151" strokeWidth="1.2"/>
+        <text x="564" y="584" textAnchor="middle" fill="#e5e7eb" fontSize="12" fontWeight="600">④ CLUSTER</text>
+        <text x="564" y="598" textAnchor="middle" fill="#9ca3af" fontSize="10">déduplication sémantique</text>
+
+        {/* ── out of pipeline → FEED + ADMIN ── */}
+        <line x1="360" y1="622" x2="360" y2="640" stroke="#6366f1" strokeWidth="1.5"/>
+        <line x1="180" y1="640" x2="540" y2="640" stroke="#6366f1" strokeWidth="1.5"/>
+        <line x1="180" y1="640" x2="180" y2="658" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+        <line x1="540" y1="640" x2="540" y2="658" stroke="#6366f1" strokeWidth="1.5" markerEnd="url(#ar-indigo)"/>
+
+        {/* FEED */}
+        <rect x="80" y="660" width="200" height="72" rx="6" fill="#111827" stroke="#4b5563" strokeWidth="1.2"/>
+        <text x="180" y="680" textAnchor="middle" fill="#e5e7eb" fontSize="13" fontWeight="600">FEED (React)</text>
+        <text x="180" y="697" textAnchor="middle" fill="#9ca3af" fontSize="10">badges pertinence · 👍 / 👎</text>
+        <text x="180" y="711" textAnchor="middle" fill="#9ca3af" fontSize="10">🎯 À trier · recherche · filtres</text>
+        <text x="180" y="725" textAnchor="middle" fill="#9ca3af" fontSize="10">tri par incertitude</text>
+
+        {/* ADMIN */}
+        <rect x="440" y="660" width="200" height="72" rx="6" fill="#111827" stroke="#4b5563" strokeWidth="1.2"/>
+        <text x="540" y="680" textAnchor="middle" fill="#e5e7eb" fontSize="13" fontWeight="600">ADMIN (React)</text>
+        <text x="540" y="697" textAnchor="middle" fill="#9ca3af" fontSize="10">monitoring pipeline · sources</text>
+        <text x="540" y="711" textAnchor="middle" fill="#9ca3af" fontSize="10">ancres · ML · erreurs détaillées</text>
+        <text x="540" y="725" textAnchor="middle" fill="#9ca3af" fontSize="10">statistiques</text>
+
+        {/* feedback arrow FEED → ML */}
+        <line x1="180" y1="732" x2="180" y2="768" stroke="#10b981" strokeWidth="1.5" markerEnd="url(#ar-emerald)"/>
+        <text x="190" y="755" fill="#10b981" fontSize="10">votes 👍/👎</text>
+
+        {/* ⑤ CLASSIFIEUR ML */}
+        <rect x="60" y="770" width="380" height="90" rx="6" fill="#1a132e" stroke="#a855f7" strokeWidth="1.5"/>
+        <text x="250" y="792" textAnchor="middle" fill="#e9d5ff" fontSize="13" fontWeight="600">⑤ CLASSIFIEUR ML</text>
+        <text x="250" y="810" textAnchor="middle" fill="#c4b5fd" fontSize="11">régression logistique numpy · CPU · zéro VRAM</text>
+        <text x="250" y="827" textAnchor="middle" fill="#c4b5fd" fontSize="10">embeddings 768d → ml_relevance (proba 0–100)</text>
+        <text x="250" y="843" textAnchor="middle" fill="#c4b5fd" fontSize="10">retrain horaire si nouveaux votes (min 10/classe)</text>
+
+        {/* curved loop-back from ML to DB (active learning closure) */}
+        <path
+          d="M 440,800 C 690,800 690,140 614,140"
+          stroke="#a855f7"
+          strokeWidth="1.5"
+          fill="none"
+          strokeDasharray="4 3"
+          markerEnd="url(#ar-purple)"
+        />
+        <text x="678" y="470" textAnchor="end" fill="#a855f7" fontSize="9" opacity="0.85">
+          écrit ml_relevance en base
+        </text>
+        <text x="678" y="482" textAnchor="end" fill="#a855f7" fontSize="9" opacity="0.7">
+          (relu au prochain refresh)
+        </text>
+      </svg>
+
+      {/* Color legend */}
+      <div className="mt-4 pt-3 border-t border-gray-800 text-xs text-gray-500 flex flex-wrap gap-x-5 gap-y-1.5">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-4 h-0.5 bg-indigo-500"/> flux principal des articles
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-4 h-0.5 bg-red-600"/> rejet par le gate
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-4 h-0.5 bg-emerald-500"/> feedback humain
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-4 border-t border-dashed border-purple-500"/> boucle d'apprentissage (asynchrone)
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /** Glossary entry — definition list row with anchor + highlight on hover. */
 function Term({
   name, emphasize, children,
@@ -240,60 +417,17 @@ export default function Docs() {
 
           <Sub title="Architecture globale">
             <P>
-              Le système orchestre <strong className="text-gray-300">trois familles de modèles</strong> (gate géométrique sans LLM,
-              enrichissement LLM, classifieur ML personnel) autour d'une base de données unique.
-              Les boucles humaines (votes 👍/👎, gestion des ancres) bouclent sur la même base.
+              Le système orchestre <strong className="text-gray-300">trois familles de traitements</strong> autour
+              d'une base de données unique : un gate géométrique sans LLM (ancres ± + embeddings),
+              une chaîne LLM (enrichissement, fact-check dual, clustering) et un classifieur ML
+              personnel entraîné sur vos votes. Les boucles humaines bouclent toujours via la base.
             </P>
-            <Code>{`        ┌──────────────────┐
-        │     SOURCES      │   17 sources : arXiv · OpenAI · HuggingFace · DeepMind ·
-        │  RSS · API · HN  │   Microsoft · Meta · Google · Anthropic · Reddit · HN · Dev.to…
-        └────────┬─────────┘
-                 │  collecteurs (RSS, arXiv, HN Algolia) — cron APScheduler
-                 ▼
-        ┌──────────────────────────────────────────────────────────────────┐
-        │                    MariaDB 11  (état du pipeline)                 │
-        │  articles · embeddings · corroborations · fact_checks · tags ·    │
-        │  topic_anchors · feedback · ml_models · sources                   │
-        └────────┬─────────────────────────────────────────────────────────┘
-                 │  pipeline continu (thread Python, polling)
-                 ▼
-   ┌─────────────────────────────────────────────────────────────────────┐
-   │                                                                     │
-   │   collecte                                                          │
-   │       │  ① GATE PERTINENCE   (nomic-embed-text + ancres ±)         │
-   │       │     marge < t_low ──────────────┐                          │
-   │       ▼                                 ▼                          │
-   │   pertinent                         hors_sujet (état terminal —    │
-   │       │  ② ENRICHEUR (qwen3.5)        masqué du feed mais conservé)│
-   │       │     résumé + tags + verdict pertinence                     │
-   │       ▼                                                             │
-   │   enrichi                                                           │
-   │       │  ③ SCORER (qwen3.5 + llama3.2)                             │
-   │       │     corroboration · fact-check dual · fraîcheur            │
-   │       ▼                                                             │
-   │   score ──▶ ④ CLUSTER (déduplication sémantique)                   │
-   │                                                                     │
-   └────────┬────────────────────────────────────────────────────────────┘
-            │
-            ├─────────────────────────────────┐
-            ▼                                 ▼
-   ┌──────────────────┐              ┌──────────────────┐
-   │   FEED (React)   │              │  ADMIN (React)   │
-   │  badges · 👍/👎 │              │  monitoring ·    │
-   │  À trier · 🔍   │              │  ancres · ML ·   │
-   └─────┬────────────┘              │  erreurs pipeline│
-         │ 👍/👎 + ancres            └──────────────────┘
-         ▼
-   ┌──────────────────────────────┐
-   │ ⑤ CLASSIFIEUR ML (numpy CPU) │
-   │ logreg sur embeddings 768d   │
-   │ retrain horaire si nouveaux  │
-   │ feedbacks (min 10/classe)    │
-   └──────────────────────────────┘`}</Code>
+            <ArchitectureDiagram />
             <p className="text-xs text-gray-600 leading-relaxed mb-4">
               Les 5 étages numérotés sont des workers séparés qui tournent en parallèle dans un
               <code className="text-indigo-300 bg-gray-900 px-1 rounded mx-1">ThreadPoolExecutor</code>. La transition entre étages est
-              matérialisée par le champ <code className="text-indigo-300 bg-gray-900 px-1 rounded">articles.status</code> en base.
+              matérialisée par le champ <code className="text-indigo-300 bg-gray-900 px-1 rounded">articles.status</code> en base —
+              chaque flèche pleine correspond à une mise à jour de ce champ.
             </p>
           </Sub>
 
