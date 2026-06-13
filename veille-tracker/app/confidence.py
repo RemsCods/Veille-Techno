@@ -62,7 +62,11 @@ def score_corroboration(article: Article, db: Session) -> float:
         return 30.0  # no embedding yet → neutral, not penalized
 
     vec_a = np.array(bytes_to_vector(article.embedding.vec_data), dtype=np.float32)
-    window = datetime.utcnow() - timedelta(hours=settings.corroboration_window_hours)
+    # Corroboration window centered on THIS article's collection time (±N h),
+    # not on "now": re-scoring an old article must still find its contemporaries.
+    # The old now-anchored window made every legacy article score 30 (no peers).
+    window_s = settings.corroboration_window_hours * 3600
+    a_time = article.collected_at
 
     # Use in-memory cache — no DB roundtrip per article
     cache = _get_vec_cache(db)
@@ -71,7 +75,8 @@ def score_corroboration(article: Article, db: Session) -> float:
         for art_id, source_id, collected_at, vec in cache
         if art_id != article.id
         and source_id != article.source_id
-        and (collected_at is None or collected_at >= window)
+        and (collected_at is None or a_time is None
+             or abs((collected_at - a_time).total_seconds()) <= window_s)
     ]
 
     if not candidates:
@@ -254,17 +259,23 @@ def score_fact_check(article: Article, db: Session) -> float:
 
 
 def score_recency(article: Article) -> float:
-    """Pure recency: how fresh is the publication date."""
+    """
+    Recency of the publication date — SOFTENED (2026-06-14): a floor replaces the
+    old hard 0, and an unknown date is neutral, not worst-case. Re-scoring an old
+    article no longer collapses its confidence just because time has passed.
+    """
     if not article.published_at:
-        return 0.0
+        return 50.0          # unknown date → neutral (was 0)
     age = (datetime.utcnow() - article.published_at).total_seconds() / 3600
     if age < 24:
         return 100.0
-    if age < 72:
-        return 60.0
-    if age < 168:
-        return 25.0
-    return 0.0
+    if age < 72:             # < 3 days
+        return 80.0
+    if age < 168:            # < 1 week
+        return 65.0
+    if age < 720:            # < ~1 month
+        return 50.0
+    return 40.0              # floor for old articles (was 0)
 
 
 def score_completeness(article: Article) -> float:

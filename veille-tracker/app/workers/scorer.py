@@ -28,6 +28,8 @@ def run_scorer(batch: int = 25) -> int:
             )
             if _claimed_ids:
                 q = q.filter(Article.id.notin_(_claimed_ids))
+            # fresh (reviewed_at NULL) scored before re-review articles
+            q = q.order_by(Article.reviewed_at.asc())
             ids = [r[0] for r in q.limit(batch).all()]
             _claimed_ids.update(ids)
         except Exception:

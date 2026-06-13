@@ -44,6 +44,19 @@ def run_reviewer(batch: int = 8) -> int:
     """
     db = SessionLocal()
     try:
+        # Yield to freshly-collected work: never inject re-review while any fresh
+        # article (reviewed_at NULL) is still flowing through the funnel.
+        fresh_pending = (
+            db.query(Article.id)
+            .filter(
+                Article.status.in_(["collecte", "pertinent", "processing", "enrichi"]),
+                Article.reviewed_at.is_(None),
+            )
+            .first()
+        )
+        if fresh_pending:
+            return 0
+
         ids = [
             r[0]
             for r in (

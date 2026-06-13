@@ -1131,7 +1131,38 @@ actif), endpoints OK. L'article 1633 (erreur 1020 transitoire) se ré-traite et 
 
 ---
 
-## État du projet — juin 2026 (après session 18)
+## Session 19 — 14 juin 2026 : Recalibrage du score + priorité aux articles frais
+
+### Problème 1 — distribution compressée par la re-review
+Mesuré : les articles re-vérifiés s'écrasaient sur **46–66** (0 fiable ≥70), alors que les
+frais s'étalaient 37–92. Re-passer un article **baissait** son score (~−10 pts). Causes : 99,9 %
+des articles re-vérifiés ont `recency=0` (publiés >7 j), et la corroboration ne regardait que
+les 72 h **avant `NOW()`** → un vieil article ne trouve jamais ses contemporains (3,6 % corrélés).
+Décision : **adoucir la récence** + **corriger la corroboration** (mêmes poids, cohérence gardée).
+
+- `confidence.py` `score_recency` : plancher au lieu de 0 — `<24h 100 · <3j 80 · <7j 65 ·
+  <30j 50 · au-delà 40` ; date inconnue → 50 (était 0).
+- `confidence.py` `score_corroboration` : fenêtre **centrée sur `article.collected_at` (±72 h)**
+  au lieu de `NOW()−72h` → les vieux articles se corroborent entre contemporains.
+- `scripts/rescore_confidence.py` (nouveau) : re-score **sans LLM** tout le corpus (fact_checks
+  stockés + corroboration recalculée + récence adoucie). `--dry-run` montre l'avant/après.
+
+**Résultat (4 935 articles re-scorés, 0 appel LLM)** : fiables (≥70) **462 → 682** ; bande 80–100
+**3 → 22**. Sous-ensemble re-vérifié : **46–66 → 42,5–86,2**, fiables **0 → 26** — l'effet de
+classement est restauré et re-passer un article ne l'effondre plus.
+
+### Problème 2 — priorité aux articles frais
+La re-review tournait en continu et les articles fraîchement collectés passaient **derrière**
+les re-injectés (même file `pertinent`/`enrichi`, sans ordre). Correctifs :
+- `enricher` + `scorer` : claim `ORDER BY reviewed_at ASC` → les **frais** (`reviewed_at` NULL)
+  sont servis avant les re-injectés.
+- `reviewer` : **cède** (n'injecte rien) tant qu'un article frais est en attente dans le funnel.
+- Note : le débit (~8/min) est plafonné par le LLM (3 threads), pas par les batchs (25×3) ; la
+  priorité garantit que les frais passent en premier au débit max.
+
+---
+
+## État du projet — juin 2026 (après session 19)
 
 ### Fonctionnalités en production
 - ✅ Collecte automatique (~24 sources, RSS + arXiv + HN) — filtre HN corrigé (word boundaries)

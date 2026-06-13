@@ -100,6 +100,7 @@ def run_enricher(batch: int = 25) -> int:
                     Article.status == "pertinent",
                     Article.error_count < MAX_PIPELINE_ATTEMPTS,   # skip parked articles
                 )
+                .order_by(Article.reviewed_at.asc())   # fresh (reviewed_at NULL) before re-review
                 .limit(batch)
                 .all()
             )

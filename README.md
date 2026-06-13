@@ -146,11 +146,11 @@ Score = 0.40 × score_source
 
 **`score_source` (40%)** — Static reliability score assigned to the source in the database (0–100). Reflects editorial standards, track record, and domain authority. Determined at seed time, adjustable by admins.
 
-**`score_corroboration` (30%)** — Measures how many **independent** sources cover the same topic within a 72-hour window. Computed via cosine similarity on article embeddings (threshold ≥ 0.85). Key insight: corroboration only counts when sources are genuinely independent — the same article republished on 5 aggregators is not corroboration.
+**`score_corroboration` (30%)** — Measures how many **independent** sources cover the same topic within **±72 h of the article's own collection time** (not "now", so re-scoring an old article still finds its contemporaries). Computed via cosine similarity on article embeddings (threshold ≥ 0.85). Key insight: corroboration only counts when sources are genuinely independent — the same article republished on 5 aggregators is not corroboration.
 
 **`score_fact_check` (20%)** — **Dual-model** pass: two cross-family local LLMs (`qwen3.5:9b` + `llama3.2:3b`) each extract verifiable claims and mark them *supported* / *unsupported* / *unverifiable*. Their verdicts are merged by consensus — agreement keeps the verdict, a *supported* vs *unsupported* clash becomes *contested* (half credit), and any *unverifiable* is treated conservatively. Score = (supported + ½·contested) / total verifiable claims. Falls back gracefully if one model is unavailable.
 
-**`score_freshness` (10%)** — Average of two sub-scores, shown separately in the article detail view: *recency* (publication date: <24h = 100, <72h = 60, <7d = 25) and *completeness* (named author +40, content >500 chars +60).
+**`score_freshness` (10%)** — Average of two sub-scores, shown separately in the article detail view: *recency* (publication date, softened with a floor so re-scoring an old article doesn't collapse it: <24h = 100, <3d = 80, <1w = 65, <1mo = 50, older = 40, unknown = 50) and *completeness* (named author +40, content >500 chars +60).
 
 ### Reliability threshold
 
