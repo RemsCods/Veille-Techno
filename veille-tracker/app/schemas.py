@@ -69,12 +69,15 @@ class ArticleOut(BaseModel):
     published_at: Optional[datetime] = None
     collected_at: datetime
     confidence_score: Optional[float] = None
+    previous_confidence_score: Optional[float] = None  # score before the last re-review (old→new)
     relevance: Optional[str] = None          # on_topic | borderline | off_topic
     relevance_score: Optional[float] = None  # 0-100, 50 = neutral margin
     relevance_reason: Optional[str] = None
     ml_relevance: Optional[float] = None     # learned classifier probability, 0-100
     feedback: Optional[FeedbackOut] = None   # human 👍/👎 verdict
     status: str
+    pipeline_version: int = 1                # version that last fully processed this article
+    reviewed_at: Optional[datetime] = None   # last idle re-review pass (None = never reviewed)
     tags: list[TagOut] = []
     cluster_size: int = 1    # >1 means this article is a cluster canonical with duplicates
 

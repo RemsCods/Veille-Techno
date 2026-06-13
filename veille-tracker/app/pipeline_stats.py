@@ -11,6 +11,7 @@ class PipelineStats:
         self._scored: deque[float] = deque()
         self._embedded: deque[float] = deque()
         self._gated: deque[float] = deque()
+        self._reviewed: deque[float] = deque()   # legacy articles re-injected by the idle reviewer
         self._enrich_errors: deque[float] = deque()
         self._score_errors: deque[float] = deque()
         self._scoring_active: int = 0
@@ -46,6 +47,12 @@ class PipelineStats:
         with self._lock:
             for _ in range(n):
                 self._gated.append(now)
+
+    def record_reviewed(self, n: int = 1) -> None:
+        now = time.monotonic()
+        with self._lock:
+            for _ in range(n):
+                self._reviewed.append(now)
 
     def record_enrich_error(self, article_id: int | None = None, message: str = "") -> None:
         now = time.monotonic()
@@ -95,6 +102,7 @@ class PipelineStats:
             "scored_per_min":        self._rate(self._scored),
             "embedded_per_min":      self._rate(self._embedded),
             "gated_per_min":         self._rate(self._gated),
+            "reviewed_per_min":      self._rate(self._reviewed),
             "enrich_errors_per_min": self._rate(self._enrich_errors),
             "score_errors_per_min":  self._rate(self._score_errors),
         }

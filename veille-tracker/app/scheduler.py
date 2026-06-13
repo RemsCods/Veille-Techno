@@ -61,6 +61,7 @@ def _continuous_pipeline() -> None:
     from workers.scorer import run_scorer
     from workers.embed_missing import run_embed_missing
     from workers.cluster import run_cluster
+    from workers.reviewer import run_reviewer
 
     pool = ThreadPoolExecutor(max_workers=9, thread_name_prefix="pipeline")
 
@@ -85,8 +86,20 @@ def _continuous_pipeline() -> None:
             n_embedded  = f_em.result()
             n_clustered = f_cl.result()
 
-            if n_gated == 0 and n_enriched == 0 and n_scored == 0 and n_embedded == 0 and n_clustered == 0:
-                _pipeline_stop.wait(timeout=15)
+            # "Idle" = nothing flowed through the collect → enrich → score funnel
+            # this cycle. n_clustered is deliberately EXCLUDED: clustering is a
+            # post-scoring maintenance pass that can report churn on chained
+            # clusters every cycle (its depth-1 transitive closure is not fully
+            # idempotent), which would otherwise mask the idle state and starve
+            # the re-review forever.
+            if n_gated == 0 and n_enriched == 0 and n_scored == 0 and n_embedded == 0:
+                # Pipeline idle → re-inject a small batch of legacy articles for
+                # re-review (re-enrich + re-score). Self-throttled: injecting
+                # makes the next loop non-idle, so nothing more is injected until
+                # the batch drains, and a real collection always takes priority.
+                n_review = run_reviewer(settings.review_batch) if settings.review_enabled else 0
+                if n_review == 0:
+                    _pipeline_stop.wait(timeout=15)
         except Exception:
             _pipeline_stop.wait(timeout=10)
 

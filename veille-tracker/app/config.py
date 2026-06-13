@@ -1,6 +1,14 @@
 from pydantic_settings import BaseSettings
 
 
+# Version of the enrich/score pipeline. Bump this whenever the enrich/score
+# logic changes meaningfully → the idle reviewer (workers/reviewer.py) then
+# re-sweeps the whole corpus up to the new version. Articles last processed by
+# an older version (pipeline_version < this) are eligible for re-review.
+# Legacy rows (migration 003) carry version 1.
+CURRENT_PIPELINE_VERSION = 2
+
+
 class Settings(BaseSettings):
     db_host: str = "db"
     db_port: int = 3306
@@ -28,6 +36,11 @@ class Settings(BaseSettings):
     # < t_low = off_topic (skips LLM stages) · >= t_high = on_topic · between = borderline
     relevance_t_low: float = -0.12
     relevance_t_high: float = 0.05
+
+    # Idle re-review: when the pipeline has nothing else to do, re-inject a
+    # small flow of legacy scored articles to re-enrich + re-score them.
+    review_enabled: bool = True
+    review_batch: int = 8     # articles re-injected per idle cycle (self-throttled — only runs when idle)
 
     @property
     def database_url(self) -> str:

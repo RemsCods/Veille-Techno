@@ -7,6 +7,7 @@ from models import Article, Tag
 from ollama_client import chat
 from tag_normalizer import normalize_tag_list
 from relevance import merge_relevance
+from config import CURRENT_PIPELINE_VERSION
 from pipeline_stats import stats as _stats
 
 # v2 prompt: same single LLM call now also returns a relevance verdict —
@@ -73,7 +74,11 @@ def enrich_article(article: Article, db: Session) -> None:
 
     # off_topic confirmed by the LLM -> leaves the pipeline (never scored).
     # Kept in DB with its summary/tags for audit and possible re-inclusion.
-    article.status = "hors_sujet" if final == "off_topic" else "enrichi"
+    if final == "off_topic":
+        article.status = "hors_sujet"
+        article.pipeline_version = CURRENT_PIPELINE_VERSION   # terminal state
+    else:
+        article.status = "enrichi"
     db.commit()
 
 

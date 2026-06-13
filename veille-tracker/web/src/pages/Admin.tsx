@@ -515,6 +515,11 @@ export default function Admin() {
 
   const distTotal = Object.values(data.score_distribution).reduce((a, b) => a + b, 0);
 
+  // Idle re-review sweep progress: how much of the scored corpus is already on
+  // the current pipeline version (pending = scored articles still on an older one).
+  const reviewUpToDate = Math.max(0, scored - data.review_pending);
+  const reviewPct = scored > 0 ? (reviewUpToDate / scored) * 100 : 100;
+
   return (
     <div className="space-y-8">
       {modalNode}
@@ -716,6 +721,56 @@ export default function Admin() {
         </div>
 
         <p className="text-xs text-gray-700">auto-refresh every 5s · sparklines = last 6 min (30s intervals)</p>
+      </div>
+
+      {/* ── Re-vérification (assurance qualité) ───────────────────────────── */}
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-5 space-y-4">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">
+            Re-vérification
+            <span className="text-gray-600 font-normal ml-2 normal-case">
+              repasse les anciens articles dans la pipeline quand elle est au repos
+            </span>
+          </h2>
+          <span className="flex items-center gap-3 text-xs">
+            {data.reviewed_per_min > 0 && (
+              <span className="text-indigo-400 animate-pulse">🔁 {data.reviewed_per_min}/min</span>
+            )}
+            <span className="text-gray-600">pipeline v{data.current_pipeline_version}</span>
+            <span
+              className={
+                data.review_enabled
+                  ? "px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-400"
+                  : "px-1.5 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-500"
+              }
+            >
+              {data.review_enabled ? "actif" : "désactivé"}
+            </span>
+          </span>
+        </div>
+
+        <div>
+          <div className="flex justify-between items-center text-xs text-gray-400 mb-1.5">
+            <span>
+              Corpus scoré à la version courante
+              <span className="text-gray-600 ml-2">
+                {data.review_pending > 0
+                  ? `${fmtNum(data.review_pending)} article${data.review_pending > 1 ? "s" : ""} à re-vérifier`
+                  : "tout est à jour ✓"}
+              </span>
+            </span>
+            <span className={reviewPct >= 99.5 ? "text-emerald-400" : "text-indigo-300"}>
+              {fmtNum(reviewUpToDate)} / {fmtNum(scored)} — {reviewPct.toFixed(1)}%
+            </span>
+          </div>
+          <ProgressBar pct={reviewPct} color={reviewPct >= 99.5 ? "bg-emerald-500" : "bg-indigo-500"} />
+        </div>
+
+        <p className="text-xs text-gray-700">
+          {fmtNum(data.reviewed_count)} article{data.reviewed_count > 1 ? "s" : ""} déjà repassé
+          {data.reviewed_count > 1 ? "s" : ""} dans la pipeline · ne tourne que lorsque la pipeline est
+          au repos (cède toujours la priorité à une vraie collecte)
+        </p>
       </div>
 
       {/* ── Score distribution + Quality ─────────────────────────────────── */}

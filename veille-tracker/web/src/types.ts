@@ -15,12 +15,15 @@ export interface Article {
   published_at: string | null;
   collected_at: string;
   confidence_score: number | null;
+  previous_confidence_score: number | null;  // score before the last re-review (old→new)
   relevance: RelevanceBucket | null;
   relevance_score: number | null;   // 0-100, 50 = neutral margin
   relevance_reason: string | null;
   ml_relevance: number | null;      // learned classifier probability, 0-100
   feedback: { verdict: "pertinent" | "non_pertinent" } | null;
   status: string;
+  pipeline_version: number;         // version that last fully processed this article
+  reviewed_at: string | null;       // last idle re-review pass (null = never reviewed)
   tags: Tag[];
   cluster_size: number;  // >1 = canonical with N-1 similar articles from other sources
 }
@@ -148,6 +151,11 @@ export interface AdminStats {
   feedback_count: number;
   ml_last_trained: string | null;
   ml_accuracy: number | null;
+  review_enabled: boolean;
+  current_pipeline_version: number;
+  review_pending: number;
+  reviewed_count: number;
+  reviewed_per_min: number;
   corroboration_coverage: number;
   fact_check_coverage: number;
   top_tags: TagCount[];

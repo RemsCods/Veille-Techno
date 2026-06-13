@@ -67,6 +67,16 @@ export default function ArticleCard({ article }: Props) {
           </span>
         )}
 
+        {/* Re-review badge — article was re-passed through the pipeline */}
+        {article.reviewed_at && (
+          <span
+            className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-indigo-500/10 border border-indigo-500/30 text-indigo-400"
+            title={`Repassé dans la pipeline le ${fmtDate(article.reviewed_at)}`}
+          >
+            🔁 revu
+          </span>
+        )}
+
         <span className="ml-auto flex items-center gap-2">
           <FeedbackButtons articleId={article.id} verdict={article.feedback?.verdict ?? null} />
           <a

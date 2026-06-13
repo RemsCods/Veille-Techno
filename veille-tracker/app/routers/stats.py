@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from models import Article, Corroboration, FactCheck, Source, CollectLog, Embedding, Tag
 from schemas import StatsOut
-from config import settings
+from config import settings, CURRENT_PIPELINE_VERSION
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
@@ -116,6 +116,12 @@ class AdminStatsOut(BaseModel):
     feedback_count: int
     ml_last_trained: Optional[datetime]
     ml_accuracy: Optional[float]
+    # Idle re-review (quality assurance sweep of legacy articles)
+    review_enabled: bool
+    current_pipeline_version: int
+    review_pending: int                      # scored articles still on an older pipeline version
+    reviewed_count: int                      # articles re-reviewed at least once
+    reviewed_per_min: float
     # Coverage (pct of scored articles)
     corroboration_coverage: float
     fact_check_coverage: float
@@ -290,6 +296,20 @@ def get_admin_stats(db: Session = Depends(get_db)):
     feedback_count = db.query(func.count(Feedback.article_id)).scalar() or 0
     last_model = db.query(MlModel).order_by(MlModel.trained_at.desc()).first()
 
+    # ── Idle re-review sweep ─────────────────────────────────────────────
+    # Pending = scored articles still on an older pipeline version (the idle
+    # reviewer re-enriches + re-scores them; this count drops to 0 as it sweeps).
+    review_pending = (
+        db.query(func.count(Article.id))
+        .filter(Article.status == "score", Article.pipeline_version < CURRENT_PIPELINE_VERSION)
+        .scalar() or 0
+    )
+    reviewed_count = (
+        db.query(func.count(Article.id))
+        .filter(Article.reviewed_at.isnot(None))
+        .scalar() or 0
+    )
+
     # ── Embeddings ───────────────────────────────────────────────────────
     embeddings_done = db.query(func.count(Embedding.article_id)).scalar() or 0
 
@@ -340,6 +360,11 @@ def get_admin_stats(db: Session = Depends(get_db)):
         feedback_count=feedback_count,
         ml_last_trained=last_model.trained_at if last_model else None,
         ml_accuracy=last_model.accuracy if last_model else None,
+        review_enabled=settings.review_enabled,
+        current_pipeline_version=CURRENT_PIPELINE_VERSION,
+        review_pending=int(review_pending),
+        reviewed_count=int(reviewed_count),
+        reviewed_per_min=rates["reviewed_per_min"],
         corroboration_coverage=corr_coverage,
         fact_check_coverage=fc_coverage,
         top_tags=top_tags,

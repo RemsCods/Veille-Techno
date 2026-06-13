@@ -106,6 +106,27 @@ def _cluster_article(article_id: int, db) -> bool:
         return False
 
     canonical_id = best[0]
+    non_canonical = cluster_ids - {canonical_id}
+
+    # ── Skip if the DB already reflects this clustering ──────────────────────
+    # Without this, an already-clustered article is "re-clustered" (same values)
+    # on every pipeline cycle and still reported as work done — the pipeline then
+    # never registers as idle. Comparing to the current state keeps the worker
+    # idempotent in its RETURN value: a fully-clustered corpus reports 0 work
+    # (so the idle re-review can kick in), while a changed canonical or a new
+    # cluster member still triggers a real update below.
+    current = db.execute(text(f"""
+        SELECT id, canonical_id, cluster_size
+        FROM articles
+        WHERE id IN ({id_list})
+    """)).fetchall()
+    cur = {r[0]: (r[1], r[2]) for r in current}
+    already_clustered = (
+        cur.get(canonical_id) == (None, cluster_size)
+        and all(cur.get(i) == (canonical_id, 1) for i in non_canonical)
+    )
+    if already_clustered:
+        return False
 
     # ── Update: canonical gets cluster_size, others get canonical_id ─────────
     db.execute(text(f"""
@@ -114,7 +135,6 @@ def _cluster_article(article_id: int, db) -> bool:
         WHERE id = :cid
     """), {"size": cluster_size, "cid": canonical_id})
 
-    non_canonical = cluster_ids - {canonical_id}
     if non_canonical:
         nc_list = ", ".join(str(i) for i in non_canonical)
         db.execute(text(f"""

@@ -2,6 +2,7 @@ import threading
 from database import SessionLocal
 from models import Article
 from confidence import compute_confidence
+from config import CURRENT_PIPELINE_VERSION
 from pipeline_stats import stats as _stats
 
 # Lock held only during the claim step (milliseconds), not during LLM calls.
@@ -45,6 +46,10 @@ def run_scorer(batch: int = 25) -> int:
             try:
                 article.confidence_score = compute_confidence(article, db)
                 article.status = "score"
+                # Stamp the version that produced this score (terminal state):
+                # marks it as processed by the current pipeline so the idle
+                # reviewer won't re-pick it until CURRENT_PIPELINE_VERSION bumps.
+                article.pipeline_version = CURRENT_PIPELINE_VERSION
                 db.commit()
                 count += 1
                 _stats.record_scored()

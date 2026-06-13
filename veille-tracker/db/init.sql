@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS articles (
   published_at     DATETIME,
   collected_at     DATETIME NOT NULL DEFAULT NOW(),
   confidence_score FLOAT,
+  previous_confidence_score FLOAT,            -- score before the last re-review (old→new display)
   -- relevance = is this article in the watch scope? (independent of confidence)
   relevance        ENUM('on_topic','borderline','off_topic'),
   relevance_score  FLOAT,                     -- embedding similarity vs topic anchors, 0-100
@@ -34,13 +35,18 @@ CREATE TABLE IF NOT EXISTS articles (
   -- pertinent  = passed the relevance gate, waiting for enrichment
   -- hors_sujet = filtered by the gate or demoted by the LLM — never enriched/scored
   status           ENUM('collecte','processing','pertinent','enrichi','score','hors_sujet') NOT NULL DEFAULT 'collecte',
+  -- version of the enrich/score pipeline that last fully processed this article.
+  -- The idle reviewer re-sweeps articles with pipeline_version < CURRENT_PIPELINE_VERSION.
+  pipeline_version SMALLINT NOT NULL DEFAULT 1,
+  reviewed_at      DATETIME DEFAULT NULL,     -- last re-review pass (NULL = never reviewed)
   canonical_id     INT DEFAULT NULL,          -- NULL = canonical article (or not yet clustered)
   cluster_size     INT NOT NULL DEFAULT 1,    -- number of similar articles from other sources
   FOREIGN KEY (source_id) REFERENCES sources(id),
   INDEX idx_status    (status),
   INDEX idx_score     (confidence_score),
   INDEX idx_relevance (relevance),
-  INDEX idx_canonical (canonical_id)
+  INDEX idx_canonical (canonical_id),
+  INDEX idx_review    (status, pipeline_version)
 );
 
 CREATE TABLE IF NOT EXISTS tags (

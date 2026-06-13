@@ -61,6 +61,7 @@ class Article(Base):
     published_at     = Column(DateTime)
     collected_at     = Column(DateTime, nullable=False, default=datetime.utcnow)
     confidence_score = Column(Float)
+    previous_confidence_score = Column(Float)   # score before the last re-review (old→new display)
     # Relevance = in the watch scope or not (independent axis from confidence)
     relevance        = Column(Enum("on_topic", "borderline", "off_topic"))
     relevance_score  = Column(Float)                # embedding vs anchors, 0-100
@@ -71,6 +72,10 @@ class Article(Base):
         nullable=False,
         default="collecte",
     )
+    # Version of the enrich/score pipeline that last fully processed this article.
+    # The idle reviewer re-sweeps articles with pipeline_version < CURRENT_PIPELINE_VERSION.
+    pipeline_version = Column(Integer, nullable=False, default=1)
+    reviewed_at      = Column(DateTime)         # last re-review pass (NULL = never reviewed)
     # Semantic deduplication — NULL = canonical (or not yet clustered)
     canonical_id     = Column(Integer, ForeignKey("articles.id", ondelete="SET NULL"), nullable=True)
     cluster_size     = Column(Integer, nullable=False, default=1)

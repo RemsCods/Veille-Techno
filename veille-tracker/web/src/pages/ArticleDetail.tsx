@@ -22,6 +22,15 @@ export default function ArticleDetail() {
   if (isLoading) return <p className="text-gray-500">Loading…</p>;
   if (isError || !article) return <p className="text-red-400">Article not found.</p>;
 
+  // Re-reviewed by the idle pipeline → we can show the old score vs the new one.
+  const reviewed =
+    article.status === "score" &&
+    article.previous_confidence_score !== null &&
+    article.confidence_score !== null;
+  const scoreDelta = reviewed
+    ? Math.round((article.confidence_score! - article.previous_confidence_score!) * 10) / 10
+    : 0;
+
   return (
     <div className="max-w-3xl">
       <Link to="/" className="text-sm text-gray-500 hover:text-gray-300 mb-6 block">
@@ -31,6 +40,14 @@ export default function ArticleDetail() {
       <div className="flex items-start justify-between gap-4 mb-4">
         <h1 className="text-xl font-semibold text-gray-100 leading-snug">{article.title}</h1>
         <span className="flex items-center gap-1.5 flex-shrink-0">
+          {article.reviewed_at && (
+            <span
+              className="text-[11px] bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 rounded px-1.5 py-0.5"
+              title={`Repassé dans la pipeline le ${fmtDate(article.reviewed_at)}`}
+            >
+              🔁 Revu
+            </span>
+          )}
           <RelevanceBadge relevance={article.relevance} reason={article.relevance_reason} showOnTopic />
           <ConfidenceBadge score={article.confidence_score} />
         </span>
@@ -91,6 +108,24 @@ export default function ArticleDetail() {
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-4">
             Confidence score — {article.confidence_score}/100
           </h2>
+          {reviewed && (
+            <div className="-mt-2 mb-4 flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="text-gray-500">Re-vérifié par la pipeline :</span>
+              <span className="text-gray-400 line-through">{article.previous_confidence_score}</span>
+              <span className="text-gray-500">→</span>
+              <span className="text-gray-100 font-medium">{article.confidence_score}</span>
+              <span
+                className={
+                  scoreDelta > 0 ? "text-emerald-400" : scoreDelta < 0 ? "text-red-400" : "text-gray-500"
+                }
+              >
+                ({scoreDelta > 0 ? "+" : ""}{scoreDelta})
+              </span>
+              {article.reviewed_at && (
+                <span className="text-gray-600">· le {fmtDate(article.reviewed_at)}</span>
+              )}
+            </div>
+          )}
           <ScoreBreakdown
             sourceReliability={article.score_breakdown?.source ?? 0}
             corroboration={article.score_breakdown?.corroboration}

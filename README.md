@@ -12,7 +12,7 @@
 An end-to-end automated technology watch system covering the full intelligence pipeline:
 **collect → enrich → score → store → publish**
 
-The system monitors the AI/LLM space across 17 curated sources (RSS feeds + APIs), processes articles through a local LLM, computes a **confidence index** per article, and exposes the results through a web interface.
+The system monitors the AI/LLM space across ~24 curated sources (RSS feeds + APIs), editable from the admin UI, processes articles through local LLMs, computes a **confidence index** per article, and exposes the results through a web interface. When idle, it also **re-reviews** older articles through the current pipeline so scores produced by earlier pipeline versions are brought up to date.
 
 ### Core intellectual contribution
 
@@ -40,10 +40,11 @@ This principle — drawn directly from the course — underpins the entire scori
 │  │  ┌──────────┐   ┌──────────────┐   │  │
 │  │  │Scheduler │   │ API (REST)   │   │  │
 │  │  │(collect) │   │ /articles    │   │  │
-│  │  │          │   │ /sources     │   │  │
+│  │  │(review)  │   │ /sources     │   │  │
 │  │  │ Workers  │──▶│ /stats       │   │  │
-│  │  │ (enrich) │   └──────────────┘   │  │
-│  │  │ (score)  │                      │  │
+│  │  │ gate ·   │   │ /relevance   │   │  │
+│  │  │ enrich · │   └──────────────┘   │  │
+│  │  │ score    │                      │  │
 │  │  └────┬─────┘                      │  │
 │  └───────┼────────────────────────────┘  │
 │          │                               │
@@ -63,7 +64,8 @@ This principle — drawn directly from the course — underpins the entire scori
 ┌─────────────────────────┐
 │  LXC-AI  (separate)     │
 │  GPU 16 GB + Ollama     │
-│  llama3.1:8b            │
+│  qwen3.5:9b             │
+│  llama3.2:3b            │
 │  nomic-embed-text       │
 └─────────────────────────┘
 ```
@@ -83,12 +85,15 @@ Articles progress through states tracked in the `articles.status` column:
 
 ```
 collecte → [relevance gate] → pertinent → enrichi → score
-                 │
-                 └→ hors_sujet   (off-topic: kept in DB, hidden from feed,
-                                  never enriched/scored — saves 3 LLM calls/article)
+                 │                            ▲
+                 │                            │ [idle re-review]
+                 └→ hors_sujet                └─────────────────┐
+                    (off-topic: kept in DB,                      │
+                     hidden from feed, never      score (older pipeline_version)
+                     enriched/scored)             re-injected when the pipeline is idle
 ```
 
-No external queue (Redis/arq was dropped). Workers poll the DB for articles in the preceding state and advance them on success.
+No external queue (Redis/arq was dropped). Workers poll the DB for articles in the preceding state and advance them on success. Each article carries a `pipeline_version`; when nothing else is flowing through the funnel, the **reviewer** re-injects a small batch of articles scored by an older version back to `pertinent` so they are re-enriched and re-scored (see *Continuous re-review* below).
 
 ---
 
@@ -143,7 +148,7 @@ Score = 0.40 × score_source
 
 **`score_corroboration` (30%)** — Measures how many **independent** sources cover the same topic within a 72-hour window. Computed via cosine similarity on article embeddings (threshold ≥ 0.85). Key insight: corroboration only counts when sources are genuinely independent — the same article republished on 5 aggregators is not corroboration.
 
-**`score_fact_check` (20%)** — LLM-based pass that extracts verifiable factual claims from the article and marks each as *supported*, *unsupported*, or *unverifiable*. Score = ratio of supported to total verifiable claims.
+**`score_fact_check` (20%)** — **Dual-model** pass: two cross-family local LLMs (`qwen3.5:9b` + `llama3.2:3b`) each extract verifiable claims and mark them *supported* / *unsupported* / *unverifiable*. Their verdicts are merged by consensus — agreement keeps the verdict, a *supported* vs *unsupported* clash becomes *contested* (half credit), and any *unverifiable* is treated conservatively. Score = (supported + ½·contested) / total verifiable claims. Falls back gracefully if one model is unavailable.
 
 **`score_freshness` (10%)** — Average of two sub-scores, shown separately in the article detail view: *recency* (publication date: <24h = 100, <72h = 60, <7d = 25) and *completeness* (named author +40, content >500 chars +60).
 
@@ -201,27 +206,63 @@ Off-topic articles are **never deleted**: hidden from the default feed, auditabl
 
 ---
 
+## Continuous re-review (idle quality assurance)
+
+The pipeline evolves over time (new confidence formula, dual-model fact-check, LLM
+relevance verdict…). Articles processed by an **older version** keep a stale score until
+they are re-evaluated. Rather than a one-shot mass reprocess, the system re-reviews them
+**gradually, only when idle**:
+
+- Every article carries a `pipeline_version`. The constant `CURRENT_PIPELINE_VERSION`
+  (`config.py`) is the version of the current enrich/score logic — bump it whenever that
+  logic changes meaningfully and the whole corpus becomes eligible for a fresh sweep.
+- When nothing is flowing through the `collecte → enrich → score` funnel, the **reviewer**
+  (`workers/reviewer.py`) picks a small batch (`review_batch`, default 8) of `score`
+  articles whose `pipeline_version` is behind, stamps `reviewed_at`, stores the current
+  score in `previous_confidence_score`, and resets them to `pertinent`. They flow back
+  through the existing enricher → scorer and are stamped to the current version.
+- **Fair sweep:** selection is ordered `reviewed_at ASC` (never-reviewed first), so no
+  article is reviewed twice while others have never been reviewed — even if a re-review
+  fails and retries.
+- **Self-throttling:** injecting makes the next cycle non-idle, so only a trickle is
+  re-injected, and a real collection always takes priority. Disable with `review_enabled=false`.
+
+The article detail page shows the **old → new score** for re-reviewed articles, and the
+admin dashboard tracks sweep progress (`review_pending`, `reviewed_count`, `🔁 /min`).
+On the live corpus, legacy articles were systematically over-scored — re-review commonly
+corrects them downward by 10–18 points once the current dual fact-check runs.
+
+---
+
 ## Data Sources
 
-| Source | Type | Base score |
+Sources are seeded in `db/init.sql` and **managed live from the admin UI**, so the exact
+set drifts over time. Current deployment (≈24 sources):
+
+| Source | Type | Reliability |
 |---|---|---|
-| arXiv (cs.AI, cs.CL, cs.LG) | API | 95 |
-| Anthropic Blog | RSS | 90 |
-| OpenAI Blog | RSS | 90 |
+| arXiv cs.AI / cs.CL / cs.LG | API | 90 |
 | Google DeepMind | RSS | 90 |
-| Meta AI | RSS | 90 |
-| Mistral AI | RSS | 90 |
-| Hugging Face Blog | RSS | 85 |
-| Papers with Code | API | 85 |
-| MIT Technology Review (AI) | RSS | 75 |
-| Import AI Newsletter | RSS | 75 |
-| The Decoder | RSS | 70 |
+| Google Research blog | RSS | 90 |
+| Meta Engineering | RSS | 90 |
+| MIT Technology Review | RSS | 85 |
+| Google AI Blog | RSS | 80 |
+| Microsoft AI Blog | RSS | 80 |
+| Nvidia Developer Blog | RSS | 80 |
+| OpenAI Blog | RSS | 80 |
+| Hugging Face Blog | RSS | 75 |
+| The Decoder | RSS | 75 |
 | Ars Technica AI | RSS | 70 |
-| GitHub Trending (AI filter) | API | 65 |
-| Reddit r/MachineLearning | API | 60 |
+| AWS Machine Learning Blog | RSS | 70 |
+| GitHub Blog AI | RSS | 70 |
+| Import AI Newsletter | RSS | 70 |
+| Hacker News — Anthropic / Mistral queries | API (Algolia) | 65 |
 | Hacker News (AI filter) | API (Algolia) | 55 |
-| Reddit r/LocalLLaMA | API | 55 |
+| Reddit r/MachineLearning · r/LocalLLaMA · r/Deeplearning | API | 55 |
 | Dev.to (tag: ai) | RSS | 50 |
+
+> Anthropic and Mistral publish no usable RSS feed, so they are tracked via **targeted
+> Hacker News Algolia queries** (`?query=anthropic`, `?query=mistral`) instead.
 
 ---
 
@@ -254,13 +295,25 @@ CREATE TABLE articles (
   title            TEXT NOT NULL,
   content          LONGTEXT,
   summary          TEXT,
-  author           VARCHAR(300),
+  author           TEXT,
   published_at     DATETIME,
   collected_at     DATETIME NOT NULL DEFAULT NOW(),
-  confidence_score FLOAT,
-  status           ENUM('collecte','enrichi','score') NOT NULL DEFAULT 'collecte',
+  confidence_score          FLOAT,
+  previous_confidence_score FLOAT,            -- score before the last re-review (old→new)
+  -- relevance: orthogonal axis to confidence (in the watch scope or not)
+  relevance        ENUM('on_topic','borderline','off_topic'),
+  relevance_score  FLOAT,                     -- contrastive anchor margin, 0-100
+  relevance_reason VARCHAR(500),
+  ml_relevance     FLOAT,                     -- active-learning classifier probability
+  status           ENUM('collecte','processing','pertinent','enrichi','score','hors_sujet')
+                     NOT NULL DEFAULT 'collecte',
+  pipeline_version SMALLINT NOT NULL DEFAULT 1,  -- version that last fully processed it
+  reviewed_at      DATETIME,                  -- last idle re-review pass (NULL = never)
+  canonical_id     INT DEFAULT NULL,          -- semantic dedup: NULL = canonical
+  cluster_size     INT NOT NULL DEFAULT 1,
   INDEX idx_status (status),
-  INDEX idx_score  (confidence_score)
+  INDEX idx_score  (confidence_score),
+  INDEX idx_review (status, pipeline_version)
 );
 
 -- Tagging
@@ -275,10 +328,10 @@ CREATE TABLE articles_tags (
   PRIMARY KEY (article_id, tag_id)
 );
 
--- Embeddings for corroboration
+-- Embeddings for corroboration + relevance gate (768-d nomic vectors)
 CREATE TABLE embeddings (
   article_id INT PRIMARY KEY REFERENCES articles(id),
-  vector     BLOB NOT NULL,
+  vec_data   LONGBLOB NOT NULL,
   model      VARCHAR(100) NOT NULL,
   dimensions INT NOT NULL
 );
@@ -291,13 +344,15 @@ CREATE TABLE corroborations (
   PRIMARY KEY (article_id, similar_article_id)
 );
 
--- Fact-check results
+-- Fact-check results (dual-model consensus)
 CREATE TABLE fact_checks (
   id                INT AUTO_INCREMENT PRIMARY KEY,
   article_id        INT NOT NULL REFERENCES articles(id),
   claim             TEXT NOT NULL,
   verifiable        BOOLEAN,
-  supporting_sources TEXT
+  supporting_sources TEXT,             -- consensus: supported|unsupported|unverifiable|contested
+  fact_check_models  VARCHAR(200),     -- e.g. "qwen3.5:9b|llama3.2:3b"
+  secondary_status   VARCHAR(20)       -- second model's raw verdict (transparency)
 );
 
 -- Operational logs
@@ -309,6 +364,10 @@ CREATE TABLE collect_logs (
   errors           TEXT
 );
 ```
+
+The relevance pipeline adds three more tables (full DDL in **`db/init.sql`**, the source
+of truth): `topic_anchors` (editable positive/negative watch-scope phrases),
+`feedback` (human 👍/👎 verdicts), and `ml_models` (trained relevance classifiers).
 
 ---
 
@@ -334,19 +393,25 @@ Exposed by the `app` container. The full interactive doc is available at `/docs`
 | `POST` | `/blacklist` | Add domain to blacklist |
 | `DELETE` | `/blacklist/{id}` | Remove from blacklist |
 | `GET` | `/stats` | System-level metrics (volume, avg score, % reliable) |
+| `GET` | `/stats/admin` | Full dashboard: pipeline funnel, throughput/ETAs, errors, relevance + re-review progress |
+| `GET` | `/stats/db` | Per-table row counts and storage size |
 | `GET` | `/health` | Liveness check |
 
 ---
 
 ## Frontend
 
-Two pages:
+Four pages:
 
-**Feed** (`/`) — Paginated article list. Filter by source, minimum confidence score, category, and time range. Each card shows: title, source, publication date, tags, and confidence badge (reliable / verify).
+**Feed** (`/`) — Paginated article list. Filter by source, minimum confidence score, category, relevance, and time range; sort by score, corroborations, or *uncertainty* (active-learning triage). Each card shows title, source, date, tags, relevance + confidence badges, 👍/👎 feedback, and a 🔁 *revu* chip for re-reviewed articles.
 
-**Article Detail** (`/articles/:id`) — Full article view with LLM-generated summary, confidence score breakdown by component, list of corroborating articles, and fact-check results.
+**Article Detail** (`/articles/:id`) — Full article view with LLM summary, relevance breakdown, confidence score breakdown by component, corroborating articles, and dual-model fact-check results. Re-reviewed articles show the **old → new score**.
 
-Admin operations (source CRUD, blacklist, manual collection triggers) are handled directly through the FastAPI Swagger UI at `/docs`.
+**Admin** (`/admin`) — Live pipeline monitor (throughput, ETAs, error logs), per-source pipeline breakdown + source CRUD, watch-scope anchor editor, active-learning classifier status, and the **re-review (quality assurance)** panel.
+
+**Docs** (`/docs-page`) — In-app documentation of the methodology and pipeline.
+
+The FastAPI Swagger UI remains available at `/docs` for raw API exploration.
 
 ---
 
@@ -371,16 +436,26 @@ veille-tracker/
 │   │   ├── arxiv.py           # arXiv API collector
 │   │   └── hackernews.py      # HN Algolia collector
 │   ├── workers/
-│   │   ├── enricher.py        # collecte → enrichi (LLM summary + embed)
-│   │   └── scorer.py          # enrichi → score (confidence index)
-│   ├── scheduler.py           # APScheduler job definitions
-│   ├── ollama_client.py       # Ollama HTTP wrapper
-│   ├── confidence.py          # Score formula implementation
+│   │   ├── relevance_gate.py  # collecte → pertinent | hors_sujet (embed + anchor margin)
+│   │   ├── enricher.py        # pertinent → enrichi (LLM summary + tags + relevance verdict)
+│   │   ├── scorer.py          # enrichi → score (confidence index, stamps pipeline_version)
+│   │   ├── embed_missing.py   # backfill embeddings for legacy articles
+│   │   ├── cluster.py         # semantic dedup (canonical election)
+│   │   ├── learner.py         # active-learning classifier retrain
+│   │   └── reviewer.py        # idle re-review: re-inject legacy 'score' articles
+│   ├── scheduler.py           # APScheduler jobs + continuous pipeline loop
+│   ├── ollama_client.py       # Ollama HTTP wrapper (chat / chat_with_model / embed)
+│   ├── confidence.py          # Confidence formula (dual-model fact-check)
+│   ├── relevance.py           # Contrastive anchor gate + signal merge
+│   ├── tag_normalizer.py      # Tag canonicalisation
+│   ├── pipeline_stats.py      # In-memory throughput / error telemetry
+│   ├── scripts/               # backfill_relevance, calibrate_*, one-off migrations
 │   └── routers/
 │       ├── articles.py
 │       ├── sources.py
 │       ├── blacklist.py
-│       └── stats.py
+│       ├── relevance.py       # anchors CRUD + classifier status/retrain
+│       └── stats.py           # public + /admin + /db dashboards
 └── web/
     ├── Dockerfile
     ├── nginx.conf
@@ -388,12 +463,18 @@ veille-tracker/
     └── src/
         ├── main.tsx
         ├── App.tsx
+        ├── api.ts              # typed API client
+        ├── types.ts            # shared TS types
         ├── pages/
         │   ├── Feed.tsx
-        │   └── ArticleDetail.tsx
+        │   ├── ArticleDetail.tsx   # incl. old→new score for re-reviewed articles
+        │   ├── Admin.tsx           # pipeline monitor, anchors, re-review panel
+        │   └── Docs.tsx            # internal documentation page
         └── components/
             ├── ArticleCard.tsx
             ├── ConfidenceBadge.tsx
+            ├── RelevanceBadge.tsx
+            ├── FeedbackButtons.tsx
             └── ScoreBreakdown.tsx
 ```
 
@@ -445,12 +526,18 @@ docker compose up -d
 # Verify all containers are healthy
 docker compose ps
 
-# Seed initial sources (if not auto-seeded via init.sql)
-curl -X POST http://localhost:8000/sources -d @db/seed_sources.json
+# Sources + watch-scope anchors are auto-seeded by db/init.sql on first boot,
+# then managed live from the admin UI (http://localhost:3000/admin).
 
-# Check API
-curl http://localhost:8000/health
+# Check API (host port 8001 → container 8000)
+curl http://localhost:8001/health
 ```
+
+> **Applying a schema migration on an existing DB** (the `db/init.sql` seed only runs on
+> a fresh data volume): back up first, then pipe the numbered migration into the db
+> container, e.g.
+> `docker exec -i veille-tracker-db-1 sh -c 'mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/003_review.sql`,
+> and **rebuild `app` afterwards** (`docker compose up -d --build app`).
 
 ### Environment variables (`.env.example`)
 
@@ -464,7 +551,8 @@ DB_PASSWORD=changeme
 
 # Ollama (LXC-AI address)
 OLLAMA_HOST=http://192.168.x.x:11434
-OLLAMA_CHAT_MODEL=llama3.1:8b
+OLLAMA_CHAT_MODEL=qwen3.5:9b           # summary + tags + relevance verdict + primary fact-check
+OLLAMA_FACTCHECK_MODEL=llama3.2:3b     # secondary fact-check (cross-family double-check)
 OLLAMA_EMBED_MODEL=nomic-embed-text
 
 # Collection schedule (cron expressions)
@@ -475,7 +563,18 @@ ARXIV_COLLECT_INTERVAL=0 */2 * * *
 CORROBORATION_WINDOW_HOURS=72
 CORROBORATION_COSINE_THRESHOLD=0.85
 RELIABILITY_THRESHOLD=70
+
+# Relevance gate (contrastive margin thresholds)
+RELEVANCE_T_LOW=-0.12                  # < this → off_topic
+RELEVANCE_T_HIGH=0.05                  # ≥ this → on_topic
+
+# Idle re-review
+REVIEW_ENABLED=true
+REVIEW_BATCH=8                         # legacy articles re-injected per idle cycle
 ```
+
+> Note: the app is published on host port **8001** (`8001:8000`); the examples below
+> using `:8000` refer to the in-container port.
 
 ---
 
@@ -491,6 +590,8 @@ RELIABILITY_THRESHOLD=70
 | 2026-05-XX | Playwright / generic scraping dropped → RSS + APIs only | Removes flaky dependency; RSS/APIs sufficient for target sources |
 | 2026-05-XX | 7 containers → 3 containers (db, app, web) | Scope reduction to preserve quality on core components |
 | 2026-05-XX | Custom admin pages → FastAPI Swagger UI | Saves frontend development time with no functional loss |
+| 2026-06-12 | Relevance as an axis orthogonal to confidence (contrastive anchor gate + LLM verdict + active learning) | A reliable source can still be off-topic; spam was burning LLM budget |
+| 2026-06-13 | Idle re-review with `pipeline_version` tracking | Bring legacy scores up to date gradually, without a disruptive mass reprocess |
 
 ---
 
@@ -502,4 +603,4 @@ RELIABILITY_THRESHOLD=70
 
 ---
 
-*Last updated: June 2026*
+*Last updated: 13 June 2026*

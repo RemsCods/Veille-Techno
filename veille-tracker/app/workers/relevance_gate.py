@@ -17,6 +17,7 @@ from database import SessionLocal
 from models import Article, Embedding
 from ollama_client import embed, vector_to_bytes, bytes_to_vector
 from relevance import compute_relevance, bucket_from_margin
+from config import CURRENT_PIPELINE_VERSION
 from pipeline_stats import stats as _stats
 import numpy as np
 
@@ -134,5 +135,9 @@ def _gate_article(article: Article, db) -> None:
     )
     # off_topic stops here (no enrich/score); the rest waits for enrichment,
     # where the LLM gives its own verdict and merge_relevance() decides.
-    article.status = "hors_sujet" if bucket == "off_topic" else "pertinent"
+    if bucket == "off_topic":
+        article.status = "hors_sujet"
+        article.pipeline_version = CURRENT_PIPELINE_VERSION   # terminal state
+    else:
+        article.status = "pertinent"
     db.commit()

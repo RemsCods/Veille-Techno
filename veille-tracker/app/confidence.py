@@ -202,7 +202,8 @@ def _merge_factcheck_claims(
 
 def score_fact_check(article: Article, db: Session) -> float:
     """
-    Dual-model fact-checking: runs qwen3.5 + gemma4:e4b in sequence.
+    Dual-model fact-checking: runs the chat model + the secondary fact-check
+    model in sequence (qwen3.5:9b + llama3.2:3b by default — see config.py).
 
     Scoring:
     - 'supported' (consensus)  → full credit

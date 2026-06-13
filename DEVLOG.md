@@ -1029,10 +1029,70 @@ du GPU : chaque article stoppé = 3 appels LLM évités.
 
 ---
 
-## État du projet — juin 2026 (après session 16)
+## Session 17 — 13 juin 2026 : Re-vérification idle des articles legacy
+
+### Problème
+Une grande partie du corpus (~4 900 articles `score`) a été traitée par d'**anciennes
+versions** de la pipeline : ancienne formule de confiance, fact-check mono-modèle, et
+surtout **aucun verdict de pertinence LLM** (le prompt v2 est récent). Le backfill de
+pertinence (session 16) n'a recalculé que les colonnes `relevance*` — il n'a jamais
+ré-enrichi ni re-scoré ces articles. Leur score n'était donc pas « à sa juste valeur ».
+
+### Solution : reviewer idle + versionnage de pipeline
+- **3 colonnes** sur `articles` (migration `db/migrations/003_review.sql`) :
+  `pipeline_version` (SMALLINT, legacy = 1), `reviewed_at` (DATETIME), et
+  `previous_confidence_score` (FLOAT, pour l'affichage ancien → nouveau).
+- Constante `CURRENT_PIPELINE_VERSION = 2` (`config.py`). Les workers terminaux (scorer,
+  enricher/gate sur `hors_sujet`) estampillent l'article à la version courante.
+  **Éligible ⇔ `status='score' AND pipeline_version < CURRENT`.** Bumper la constante
+  relance automatiquement un balayage complet à la prochaine évolution de la pipeline.
+- **`workers/reviewer.py`** : appelé **uniquement** depuis la branche idle de
+  `_continuous_pipeline`. Sélectionne un petit lot (`review_batch`, défaut 8)
+  `ORDER BY reviewed_at ASC` (jamais-revus d'abord), copie le score actuel dans
+  `previous_confidence_score`, estampille `reviewed_at`, et repasse l'article en
+  `pertinent` → il re-traverse l'enricher → scorer existants (pas de ré-embedding).
+- **Auto-throttle** : injecter rend le tour suivant non-idle ⇒ aucune nouvelle injection
+  tant que le lot n'est pas drainé, et une vraie collecte reste toujours prioritaire.
+- **Équité** garantie : un article re-scoré passe à v2 et sort du pool ; un échec en boucle
+  voit son `reviewed_at` mis à jour et repart derrière les jamais-revus (pas de famine).
+
+### Bug trouvé : la pipeline n'était jamais « idle »
+`run_cluster` re-clusterise les mêmes articles (`cluster_size=1` présents dans les
+corroborations) **à chaque cycle** et renvoyait toujours > 0, même sans changement réel
+(sa fermeture transitive depth-1 n'est pas idempotente sur les clusters chaînés). Comme
+l'idle exigeait `n_clustered == 0`, la pipeline **ne devenait jamais idle** (elle tournait
+en continu sur du re-clustering inutile) et le reviewer n'était jamais appelé. Deux fixes :
+1. `cluster.py` : ne renvoie `True`/ne réécrit que si l'état du cluster change réellement
+   (compare l'état courant avant d'écrire) → moins de churn + commits inutiles.
+2. `scheduler.py` : l'idle ne dépend plus de `n_clustered` — il signifie « rien n'a transité
+   par le funnel collecte → enrich → score ce cycle ». Le clustering reste une maintenance
+   post-scoring qui tourne en parallèle.
+
+### Vérification (corpus live)
+Migration appliquée (4 942 lignes → v1), app reconstruit. Le balayage tourne tout seul :
+`reviewed_count` grimpe 8 → 16 → 24…, `review_pending` décroît, `🔁 reviewed/min` visible.
+Confirmation de l'hypothèse : les articles legacy étaient **systématiquement surcotés** —
+ex. article #1 **67 → 49.2** (−17.8), plusieurs −10 à −18 une fois le double fact-check
+rejoué. La page détail affiche l'ancien → nouveau score, l'admin suit la progression.
+
+### UI
+- Page détail : bloc « ancien → nouveau » + badge 🔁 Revu (`ArticleDetail.tsx`).
+- Feed : puce 🔁 revu discrète sur les cartes (`ArticleCard.tsx`).
+- Admin : carte « Re-vérification (assurance qualité) » — restants / déjà revus / version /
+  débit, barre de progression (`Admin.tsx`, `stats.py` : `review_pending`, `reviewed_count`,
+  `reviewed_per_min`, `current_pipeline_version`, `review_enabled`).
+
+### Doc
+README réaligné sur la réalité au passage (modèles `qwen3.5:9b`+`llama3.2:3b` au lieu de
+`llama3.1:8b`, table des sources réelle ~24, fact-check dual, schéma `articles` à jour,
+structure projet, variables d'env, endpoints `/stats/admin` et `/stats/db`).
+
+---
+
+## État du projet — juin 2026 (après session 17)
 
 ### Fonctionnalités en production
-- ✅ Collecte automatique (19 sources, RSS + arXiv + HN) — filtre HN corrigé (word boundaries)
+- ✅ Collecte automatique (~24 sources, RSS + arXiv + HN) — filtre HN corrigé (word boundaries)
 - ✅ **Gate de pertinence contrastif** (ancres ± éditables, seuils calibrés sur corpus réel)
 - ✅ Pipeline continu : gate (nomic) → enrichissement (qwen3.5, prompt v2 avec verdict
   pertinence) → scoring → clustering
@@ -1047,6 +1107,8 @@ du GPU : chaque article stoppé = 3 appels LLM évités.
 - ✅ Admin : monitoring pipeline (6 statuts), **erreurs pipeline détaillées**, répartition
   pertinence, gestion des ancres, carte ML, sparklines, gestion sources
 - ✅ Page documentation interne refaite user-friendly (résumé 30 s, section pertinence)
+- ✅ **Re-vérification idle** : versionnage de pipeline + reviewer qui re-traite les
+  articles legacy quand la pipeline est au repos (ancien → nouveau score, panneau admin)
 - ✅ PLAN.md : suivi d'implémentation reprenable inter-sessions
 
 ### En attente de validation
@@ -1055,4 +1117,4 @@ du GPU : chaque article stoppé = 3 appels LLM évités.
 
 ---
 
-*Dernière mise à jour : 12 juin 2026*
+*Dernière mise à jour : 13 juin 2026*
