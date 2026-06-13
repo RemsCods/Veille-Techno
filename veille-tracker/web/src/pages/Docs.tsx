@@ -75,6 +75,7 @@ function Badge({ color, children }: { color: string; children: React.ReactNode }
 
 const TOC = [
   { id: "overview",       label: "Vue d'ensemble" },
+  { id: "glossary",       label: "Glossaire" },
   { id: "pipeline",       label: "Pipeline de traitement" },
   { id: "relevance",      label: "Pertinence & filtrage" },
   { id: "score",          label: "Score de confiance" },
@@ -92,6 +93,39 @@ function Tldr({ children }: { children: React.ReactNode }) {
     <div className="flex gap-2 items-start bg-indigo-950/40 border border-indigo-900/50 rounded-lg px-4 py-3 mb-5">
       <span className="text-indigo-400 text-sm">💡</span>
       <p className="text-sm text-indigo-200/90 leading-relaxed m-0">{children}</p>
+    </div>
+  );
+}
+
+/** Glossary entry — definition list row with anchor + highlight on hover. */
+function Term({
+  name, emphasize, children,
+}: {
+  name: string;
+  emphasize?: boolean;
+  children: React.ReactNode;
+}) {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+  return (
+    <div
+      id={`term-${slug}`}
+      className={`group rounded-lg border px-4 py-3 transition-colors scroll-mt-24 ${
+        emphasize
+          ? "bg-gray-900/40 border-indigo-900/40 hover:border-indigo-700/60"
+          : "bg-gray-900/20 border-gray-800/60 hover:border-gray-700"
+      }`}
+    >
+      <dt className={`flex items-center gap-2 mb-1.5 ${emphasize ? "text-indigo-300" : "text-gray-200"} font-medium text-sm`}>
+        <a
+          href={`#term-${slug}`}
+          className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-indigo-400 transition-opacity text-xs"
+          aria-label={`Lien vers ${name}`}
+        >
+          #
+        </a>
+        {name}
+      </dt>
+      <dd className="text-gray-400 leading-relaxed">{children}</dd>
     </div>
   );
 }
@@ -205,22 +239,62 @@ export default function Docs() {
           </P>
 
           <Sub title="Architecture globale">
-            <Code>{`┌─────────────┐   ┌──────────────┐   ┌──────────────┐   ┌───────────┐
-│   Sources   │──▶│  Collecteurs │──▶│  Base de     │──▶│  Pipeline  │
-│  RSS / API  │   │  rss/arxiv/  │   │  données     │   │  continu   │
-└─────────────┘   │  hackernews  │   │  (MariaDB)   │   └───────────┘
-                  └──────────────┘   └──────────────┘
-                                                              │
-                         ┌────────────────────────────────────┤
-                         ▼            ▼             ▼         ▼
-                     Enricher     Embedder       Scorer   Cluster
-                   (qwen3.5:9b) (nomic-embed) (dual LLM) (dédup)
-                         │            │             │         │
-                         └────────────┴─────────────┴─────────┘
-                                           │
-                                    ┌──────▼──────┐
-                                    │  React Feed │
-                                    └─────────────┘`}</Code>
+            <P>
+              Le système orchestre <strong className="text-gray-300">trois familles de modèles</strong> (gate géométrique sans LLM,
+              enrichissement LLM, classifieur ML personnel) autour d'une base de données unique.
+              Les boucles humaines (votes 👍/👎, gestion des ancres) bouclent sur la même base.
+            </P>
+            <Code>{`        ┌──────────────────┐
+        │     SOURCES      │   17 sources : arXiv · OpenAI · HuggingFace · DeepMind ·
+        │  RSS · API · HN  │   Microsoft · Meta · Google · Anthropic · Reddit · HN · Dev.to…
+        └────────┬─────────┘
+                 │  collecteurs (RSS, arXiv, HN Algolia) — cron APScheduler
+                 ▼
+        ┌──────────────────────────────────────────────────────────────────┐
+        │                    MariaDB 11  (état du pipeline)                 │
+        │  articles · embeddings · corroborations · fact_checks · tags ·    │
+        │  topic_anchors · feedback · ml_models · sources                   │
+        └────────┬─────────────────────────────────────────────────────────┘
+                 │  pipeline continu (thread Python, polling)
+                 ▼
+   ┌─────────────────────────────────────────────────────────────────────┐
+   │                                                                     │
+   │   collecte                                                          │
+   │       │  ① GATE PERTINENCE   (nomic-embed-text + ancres ±)         │
+   │       │     marge < t_low ──────────────┐                          │
+   │       ▼                                 ▼                          │
+   │   pertinent                         hors_sujet (état terminal —    │
+   │       │  ② ENRICHEUR (qwen3.5)        masqué du feed mais conservé)│
+   │       │     résumé + tags + verdict pertinence                     │
+   │       ▼                                                             │
+   │   enrichi                                                           │
+   │       │  ③ SCORER (qwen3.5 + llama3.2)                             │
+   │       │     corroboration · fact-check dual · fraîcheur            │
+   │       ▼                                                             │
+   │   score ──▶ ④ CLUSTER (déduplication sémantique)                   │
+   │                                                                     │
+   └────────┬────────────────────────────────────────────────────────────┘
+            │
+            ├─────────────────────────────────┐
+            ▼                                 ▼
+   ┌──────────────────┐              ┌──────────────────┐
+   │   FEED (React)   │              │  ADMIN (React)   │
+   │  badges · 👍/👎 │              │  monitoring ·    │
+   │  À trier · 🔍   │              │  ancres · ML ·   │
+   └─────┬────────────┘              │  erreurs pipeline│
+         │ 👍/👎 + ancres            └──────────────────┘
+         ▼
+   ┌──────────────────────────────┐
+   │ ⑤ CLASSIFIEUR ML (numpy CPU) │
+   │ logreg sur embeddings 768d   │
+   │ retrain horaire si nouveaux  │
+   │ feedbacks (min 10/classe)    │
+   └──────────────────────────────┘`}</Code>
+            <p className="text-xs text-gray-600 leading-relaxed mb-4">
+              Les 5 étages numérotés sont des workers séparés qui tournent en parallèle dans un
+              <code className="text-indigo-300 bg-gray-900 px-1 rounded mx-1">ThreadPoolExecutor</code>. La transition entre étages est
+              matérialisée par le champ <code className="text-indigo-300 bg-gray-900 px-1 rounded">articles.status</code> en base.
+            </p>
           </Sub>
 
           <Sub title="Stack technique">
@@ -228,13 +302,173 @@ export default function Docs() {
               headers={["Composant", "Technologie", "Rôle"]}
               rows={[
                 ["Backend",    "FastAPI + Python 3.12",    "API REST, orchestration pipeline"],
-                ["Base de données", "MariaDB 11",          "Stockage articles, tags, embeddings"],
-                ["LLM principal", "qwen3.5:9b",            "Enrichissement (résumé+tags) + fact-check primaire"],
-                ["LLM secondaire", "llama3.2:3b",          "Fact-check secondaire uniquement (contre-vérification)"],
-                ["Embeddings",  "nomic-embed-text",         "Vecteurs sémantiques 768 dim."],
+                ["Base de données", "MariaDB 11",          "Stockage articles, embeddings (BLOB), tags, ancres, feedback, modèles ML"],
+                ["LLM principal", "qwen3.5:9b",            "Enrichissement (résumé + tags + verdict pertinence) + fact-check primaire"],
+                ["LLM secondaire", "llama3.2:3b",          "Fact-check secondaire (contre-vérification cross-famille)"],
+                ["Embeddings",  "nomic-embed-text",         "Vecteurs sémantiques 768 dim. — articles, ancres de pertinence"],
+                ["Gate pertinence", "numpy (pas de LLM)",   "Filtre géométrique sur embeddings vs ancres ± avant tout appel LLM"],
+                ["Classifieur ML", "régression logistique numpy", "Apprend la pertinence depuis vos 👍/👎 — CPU, zéro VRAM"],
                 ["Scheduler",   "APScheduler",             "Collecte via CronTrigger + pipeline continu (thread)"],
-                ["Frontend",    "React 19 + Vite",         "Interface utilisateur"],
-                ["Déploiement", "Docker Compose",           "Conteneurisation"],
+                ["Frontend",    "React 19 + Vite + Tailwind",  "Feed · Admin · ArticleDetail · Docs"],
+                ["Déploiement", "Docker Compose",           "Conteneurisation (3 services : db + app + web)"],
+              ]}
+            />
+            <p className="text-xs text-gray-600 leading-relaxed mt-3 mb-4">
+              <strong className="text-gray-400">VRAM totale ~11 Go / 16 Go</strong> : qwen3.5 (~5,6 Go) + llama3.2 (~5 Go) + nomic-embed (~0,3 Go).
+              Le gate et le classifieur ML tournent sur CPU — ils ne consomment pas de VRAM.
+            </p>
+          </Sub>
+        </Section>
+
+        {/* ── 2. Glossaire ── */}
+        <Section id="glossary" title="Glossaire">
+          <Tldr>
+            Le projet mélange volontairement vocabulaire de veille (corroboration, source, fact-check)
+            et de machine learning (embedding, cosinus, marge contrastive, active learning).
+            Cette section les fixe une bonne fois pour toutes — toutes les autres sections y renvoient.
+          </Tldr>
+
+          <Sub title="Vocabulaire de veille">
+            <dl className="space-y-4 text-sm">
+              <Term name="Veille technologique">
+                Surveillance organisée et continue de l'actualité d'un domaine pour rester informé
+                des évolutions importantes. Ici : IA / LLM. Le système automatise la collecte et le
+                pré-tri, l'humain reste juge final.
+              </Term>
+              <Term name="Source" emphasize>
+                Un flux d'information identifié (RSS, API). Chaque source a une{" "}
+                <em>fiabilité</em> définie manuellement (0–100) qui reflète ses standards éditoriaux —
+                arXiv (95), OpenAI Blog (90), un forum Reddit (60), un agrégateur générique (50).
+                C'est <strong className="text-gray-300">la composante la plus lourde (40 %)</strong> du score de confiance.
+              </Term>
+              <Term name="Corroborer" emphasize>
+                Confirmer une information en la retrouvant ailleurs, depuis une{" "}
+                <strong className="text-gray-300">autre source indépendante</strong>.
+                Ici : deux articles corroborent s'ils traitent du même sujet (similarité cosinus
+                ≥ 0,85 sur leurs embeddings) et viennent de sources différentes, dans une fenêtre
+                de 72 h. <em>Idée clé du projet</em> : la présence d'une information à plusieurs
+                endroits ne prouve pas sa fiabilité — il faut que les sources soient
+                <strong className="text-gray-300"> réellement indépendantes</strong> (un article republié sur 5
+                agrégateurs n'est PAS corroboré). Voir{" "}
+                <a href="#corroboration" className="text-indigo-400 hover:text-indigo-300">section Corroboration</a>.
+              </Term>
+              <Term name="Fact-check">
+                Examen des affirmations factuelles (« claims ») d'un article : sont-elles{" "}
+                <Badge color="bg-green-900/40 text-green-300">supported</Badge>{" "}
+                (attestées, attribuées) /{" "}
+                <Badge color="bg-red-900/40 text-red-300">unsupported</Badge>{" "}
+                (affirmées sans preuve) /{" "}
+                <Badge color="bg-gray-800 text-gray-300">unverifiable</Badge>{" "}
+                (opinion, prédiction) /{" "}
+                <Badge color="bg-yellow-900/40 text-yellow-300">contested</Badge>{" "}
+                (les deux LLM ne sont pas d'accord) ?
+                Réalisé par <em>deux</em> LLM indépendants ici, d'où le terme{" "}
+                <em>dual LLM fact-check</em>. Voir{" "}
+                <a href="#factcheck" className="text-indigo-400 hover:text-indigo-300">section Double vérification LLM</a>.
+              </Term>
+              <Term name="Confiance vs Pertinence" emphasize>
+                Deux axes <strong className="text-gray-300">orthogonaux</strong> et jamais mélangés dans ce système :
+                <br/>
+                — <strong className="text-emerald-400">Confiance</strong> = « peut-on s'y fier ? »
+                (fiabilité de la source × corroboration × fact-check × fraîcheur)
+                <br/>
+                — <strong className="text-amber-400">Pertinence</strong> = « est-ce dans notre sujet de veille ? »
+                (ancres contrastives + verdict LLM + feedback humain)
+                <br/>
+                Conséquence : un article peut être <em>très fiable mais hors sujet</em> (rapport
+                financier d'OpenAI, fiable mais pas IA technique) ou{" "}
+                <em>pertinent mais peu fiable</em> (rumeur sur Reddit r/LocalLLaMA). Les deux scores
+                restent visibles séparément.
+              </Term>
+              <Term name="Cluster sémantique">
+                Groupe d'articles qui couvrent la même information depuis des sources différentes
+                (« GPT-5 sort aujourd'hui » publié par OpenAI Blog + Hacker News + The Decoder).
+                Le système élit un article <strong className="text-gray-300">canonique</strong> (le
+                mieux scoré) et masque les autres dans le feed par défaut, avec un badge{" "}
+                <span className="text-indigo-400">↔ N similar</span>. Voir{" "}
+                <a href="#cluster" className="text-indigo-400 hover:text-indigo-300">section Déduplication</a>.
+              </Term>
+            </dl>
+          </Sub>
+
+          <Sub title="Vocabulaire ML / vecteurs">
+            <dl className="space-y-4 text-sm">
+              <Term name="Embedding" emphasize>
+                Représentation numérique d'un texte sous forme de <strong className="text-gray-300">vecteur
+                de 768 nombres</strong> (modèle nomic-embed-text). Deux textes au sens proche
+                produisent des vecteurs proches. C'est ce qui permet de comparer des articles{" "}
+                <em>par le sens</em> et non par les mots exacts — un article qui parle de
+                « grand modèle de langage » et un autre qui parle de « LLM » ont des embeddings
+                similaires même sans partager un seul mot. Stockés en base dans un BLOB binaire
+                (float32 × 768 = 3 072 octets par article).
+              </Term>
+              <Term name="Similarité cosinus">
+                Mesure de similarité entre deux vecteurs : <code className="text-indigo-300 bg-gray-900 px-1 rounded">cos(a, b) = (a · b) / (|a| × |b|)</code>.
+                Vaut 1 si les vecteurs pointent dans la même direction, 0 s'ils sont orthogonaux,
+                −1 s'ils sont opposés. <strong className="text-gray-300">Insensible à la longueur</strong> des
+                textes — c'est pourquoi on l'utilise ici pour comparer des articles de tailles
+                très différentes (un tweet de 280 caractères et un papier arXiv de 30 pages).
+                Seuil de corroboration : 0,85.
+              </Term>
+              <Term name="Ancre thématique" emphasize>
+                Phrase courte qui décrit explicitement{" "}
+                <strong className="text-emerald-400">un aspect du périmètre de veille</strong>{" "}
+                (ancre <em>positive</em>) ou{" "}
+                <strong className="text-red-400">une catégorie de bruit à exclure</strong> (ancre <em>négative</em>).
+                Chaque ancre est embeddée une seule fois ; chaque nouvel article est comparé à
+                toutes les ancres actives. Exemples : <em>positive</em> = « large language models,
+                LLM releases, benchmarks and evaluations » · <em>négative</em> = « online casino,
+                sports betting tips, gambling promotions ». Éditables dans l'Admin.
+              </Term>
+              <Term name="Marge contrastive" emphasize>
+                Le signal de pertinence du gate : <code className="text-indigo-300 bg-gray-900 px-1 rounded">margin = max_cos(ancres positives) − max_cos(ancres négatives)</code>.
+                Une marge fortement positive = l'article ressemble bien plus aux sujets de veille
+                qu'au bruit ; une marge négative = c'est l'inverse. Pourquoi pas juste la
+                similarité aux positives ? Parce qu'<strong className="text-gray-300">elle ne fonctionne pas</strong> sur
+                ce corpus (espace cosinus de nomic compressé entre 0,39 et 0,82 — le spam scorait 0,55,
+                en plein milieu de la distribution légitime). La marge, elle, sépare proprement.
+                Histoire complète dans la <a href="#relevance" className="text-indigo-400 hover:text-indigo-300">section Pertinence</a>.
+              </Term>
+              <Term name="Régression logistique">
+                Le modèle ML utilisé pour le classifieur de pertinence personnel. Prend un
+                embedding (768 nombres) en entrée, produit une probabilité (0–1) que l'article
+                soit pertinent selon <em>vos</em> votes. Très simple, très rapide à entraîner
+                (millisecondes en CPU pur), parfait quand on a peu d'exemples et qu'on veut
+                un modèle interprétable. Implémenté ici en numpy pur — pas de dépendance
+                scikit-learn.
+              </Term>
+              <Term name="Active learning" emphasize>
+                Stratégie d'entraînement où c'est <strong className="text-gray-300">le modèle qui
+                choisit quels exemples</strong> il veut voir étiquetés — concrètement, ceux dont
+                il est le moins sûr. Le mode <strong className="text-indigo-300">🎯 À trier</strong> du
+                feed implémente cette idée par <em>uncertainty sampling</em> : il vous présente
+                en priorité les articles dont la proba prédite est proche de 50 %. Chaque vote
+                à cet endroit apprend au modèle bien plus qu'un vote sur un article évident.
+              </Term>
+              <Term name="Backfill">
+                Application rétroactive d'une nouvelle logique à toutes les données existantes.
+                Ici : recalculer la pertinence des 4 580 articles d'avant le gate. Le statut
+                pipeline (<code className="text-indigo-300 bg-gray-900 px-1 rounded">score</code>) est conservé
+                — seule la colonne <code className="text-indigo-300 bg-gray-900 px-1 rounded">relevance</code> est remplie.
+              </Term>
+            </dl>
+          </Sub>
+
+          <Sub title="États du pipeline (statuses)">
+            <P>
+              Le champ <code className="text-indigo-300 bg-gray-900 px-1 rounded">articles.status</code> matérialise
+              la position de l'article dans le pipeline. C'est aussi un mécanisme de claim
+              atomique (un seul worker peut faire transiter un article à la fois).
+            </P>
+            <Table
+              headers={["Status", "Sens", "Transition"]}
+              rows={[
+                [<Badge color="bg-gray-800 text-gray-300">collecte</Badge>,         "Brut, vient d'être inséré",                  "Le gate le prend"],
+                [<Badge color="bg-purple-900/40 text-purple-300">pertinent</Badge>,  "A passé le gate — embedding + classification","L'enricher le prend"],
+                [<Badge color="bg-yellow-900/40 text-yellow-300">processing</Badge>, "En cours d'enrichissement (verrou)",          "→ enrichi (succès) ou pertinent (échec)"],
+                [<Badge color="bg-blue-900/40 text-blue-300">enrichi</Badge>,        "Résumé + tags + verdict pertinence LLM",      "Le scorer le prend"],
+                [<Badge color="bg-green-900/40 text-green-300">score</Badge>,        "Score de confiance calculé — état final",     "Visible dans le feed"],
+                [<Badge color="bg-red-900/40 text-red-300">hors_sujet</Badge>,       "Écarté (gate ou LLM) — terminal",             "Conservé en base, masqué par défaut"],
               ]}
             />
           </Sub>
@@ -244,8 +478,11 @@ export default function Docs() {
         <Section id="pipeline" title="Pipeline de traitement">
           <P>
             Le pipeline est continu — un thread dédié tourne en permanence et traite les
-            articles dès qu'ils arrivent dans la base. Chaque article passe par 4 étapes
-            représentées par un champ <code className="text-indigo-300 bg-gray-900 px-1 rounded">status</code>.
+            articles dès qu'ils arrivent dans la base. Chaque article transite par 6{" "}
+            <a href="#glossary" className="text-indigo-400 hover:text-indigo-300">statuts</a>{" "}
+            (voir tableau dans le glossaire),
+            le passage étant matérialisé par le champ{" "}
+            <code className="text-indigo-300 bg-gray-900 px-1 rounded">articles.status</code>.
           </P>
 
           <Sub title="États d'un article">
