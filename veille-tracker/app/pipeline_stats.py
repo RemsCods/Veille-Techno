@@ -4,16 +4,24 @@ from collections import deque
 from datetime import datetime
 
 
+# Hard cap on each rate deque. The rate window is 60s, so legitimate counts are
+# at most a few hundred per deque; this maxlen is a safety bound so the deques
+# can never grow without limit (they are only time-trimmed when snapshot() runs,
+# i.e. when the admin page polls — without it, a long continuous run with no
+# admin open leaks memory unboundedly). 5000 ≫ any legitimate 60s count.
+_RATE_MAXLEN = 5000
+
+
 class PipelineStats:
     def __init__(self):
         self._lock = threading.Lock()
-        self._enriched: deque[float] = deque()
-        self._scored: deque[float] = deque()
-        self._embedded: deque[float] = deque()
-        self._gated: deque[float] = deque()
-        self._reviewed: deque[float] = deque()   # legacy articles re-injected by the idle reviewer
-        self._enrich_errors: deque[float] = deque()
-        self._score_errors: deque[float] = deque()
+        self._enriched: deque[float] = deque(maxlen=_RATE_MAXLEN)
+        self._scored: deque[float] = deque(maxlen=_RATE_MAXLEN)
+        self._embedded: deque[float] = deque(maxlen=_RATE_MAXLEN)
+        self._gated: deque[float] = deque(maxlen=_RATE_MAXLEN)
+        self._reviewed: deque[float] = deque(maxlen=_RATE_MAXLEN)   # legacy articles re-injected by the idle reviewer
+        self._enrich_errors: deque[float] = deque(maxlen=_RATE_MAXLEN)
+        self._score_errors: deque[float] = deque(maxlen=_RATE_MAXLEN)
         self._scoring_active: int = 0
         # Rate history — one snapshot every 30s, keeps last 12 (= 6 min)
         self._history: deque = deque(maxlen=12)

@@ -25,6 +25,10 @@ services:
         condition: service_healthy
     ports:
       - "8001:8000"
+    # Safety net: cap app memory so a runaway leak gets OOM-killed (and
+    # restarted) instead of saturating the whole host. Legitimate usage is a few
+    # hundred MB; 2g leaves ample headroom for the embedding cache + concurrency.
+    mem_limit: 2g
 
   web:
     build: ./web

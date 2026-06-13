@@ -7,7 +7,7 @@ from models import Article, Tag
 from ollama_client import chat
 from tag_normalizer import normalize_tag_list
 from relevance import merge_relevance
-from config import CURRENT_PIPELINE_VERSION
+from config import CURRENT_PIPELINE_VERSION, MAX_PIPELINE_ATTEMPTS
 from pipeline_stats import stats as _stats
 
 # v2 prompt: same single LLM call now also returns a relevance verdict —
@@ -72,6 +72,7 @@ def enrich_article(article: Article, db: Session) -> None:
         joined = f"{anchor_part} · LLM : {llm_reason}" if anchor_part else f"LLM : {llm_reason}"
         article.relevance_reason = joined[:500]
 
+    article.error_count = 0   # enrichment succeeded → reset consecutive-failure counter
     # off_topic confirmed by the LLM -> leaves the pipeline (never scored).
     # Kept in DB with its summary/tags for audit and possible re-inclusion.
     if final == "off_topic":
@@ -95,7 +96,10 @@ def run_enricher(batch: int = 25) -> int:
         with _claim_lock:
             rows = (
                 db.query(Article.id)
-                .filter(Article.status == "pertinent")
+                .filter(
+                    Article.status == "pertinent",
+                    Article.error_count < MAX_PIPELINE_ATTEMPTS,   # skip parked articles
+                )
                 .limit(batch)
                 .all()
             )
@@ -129,11 +133,15 @@ def run_enricher(batch: int = 25) -> int:
             except Exception as exc:
                 db.rollback()
                 _stats.record_enrich_error(article_id, f"{type(exc).__name__}: {exc}")
-                # On failure: revert to pertinent so it gets retried
+                # Count the failure and revert to 'pertinent' for retry; once
+                # error_count hits the cap the claim query stops picking it up.
                 try:
                     a = db.get(Article, article_id)
-                    if a and a.status == "processing":
-                        a.status = "pertinent"
+                    if a:
+                        a.error_count = (a.error_count or 0) + 1
+                        a.last_error = f"enrich: {type(exc).__name__}: {exc}"[:500]
+                        if a.status == "processing":
+                            a.status = "pertinent"
                         db.commit()
                 except Exception:
                     db.rollback()

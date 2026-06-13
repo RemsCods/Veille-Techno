@@ -8,6 +8,13 @@ from pydantic_settings import BaseSettings
 # Legacy rows (migration 003) carry version 1.
 CURRENT_PIPELINE_VERSION = 2
 
+# After this many consecutive failures at a pipeline stage, an article is parked
+# (error_count >= this) and no longer auto-claimed by the workers — this stops a
+# "poison" article from being retried every cycle forever (a tight retry loop
+# wastes CPU/LLM calls and, via the stats counters, memory). Parked articles are
+# surfaced in the admin for manual re-run or deletion.
+MAX_PIPELINE_ATTEMPTS = 3
+
 
 class Settings(BaseSettings):
     db_host: str = "db"

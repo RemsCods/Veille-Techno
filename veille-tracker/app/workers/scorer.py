@@ -2,7 +2,8 @@ import threading
 from database import SessionLocal
 from models import Article
 from confidence import compute_confidence
-from config import CURRENT_PIPELINE_VERSION
+from config import CURRENT_PIPELINE_VERSION, MAX_PIPELINE_ATTEMPTS
+from workers._errors import bump_error as _bump_error
 from pipeline_stats import stats as _stats
 
 # Lock held only during the claim step (milliseconds), not during LLM calls.
@@ -21,7 +22,10 @@ def run_scorer(batch: int = 25) -> int:
     with _claim_lock:
         db = SessionLocal()
         try:
-            q = db.query(Article.id).filter(Article.status == "enrichi")
+            q = db.query(Article.id).filter(
+                Article.status == "enrichi",
+                Article.error_count < MAX_PIPELINE_ATTEMPTS,   # skip parked articles
+            )
             if _claimed_ids:
                 q = q.filter(Article.id.notin_(_claimed_ids))
             ids = [r[0] for r in q.limit(batch).all()]
@@ -46,6 +50,7 @@ def run_scorer(batch: int = 25) -> int:
             try:
                 article.confidence_score = compute_confidence(article, db)
                 article.status = "score"
+                article.error_count = 0   # success → reset consecutive-failure counter
                 # Stamp the version that produced this score (terminal state):
                 # marks it as processed by the current pipeline so the idle
                 # reviewer won't re-pick it until CURRENT_PIPELINE_VERSION bumps.
@@ -56,6 +61,7 @@ def run_scorer(batch: int = 25) -> int:
             except Exception as exc:
                 db.rollback()
                 _stats.record_score_error(article_id, f"{type(exc).__name__}: {exc}")
+                _bump_error(db, article_id, f"score: {type(exc).__name__}: {exc}")
     finally:
         _stats.adjust_scoring_active(-len(ids))
         with _claim_lock:

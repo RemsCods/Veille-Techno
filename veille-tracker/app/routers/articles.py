@@ -33,6 +33,7 @@ def list_articles(
     deduplicate: bool = True,              # hide cluster duplicates by default
     relevance: Optional[Literal["on_topic", "borderline", "off_topic"]] = None,
     show_off_topic: bool = False,          # off-topic hidden by default (kept in DB)
+    verified: Optional[bool] = None,       # True → only re-reviewed articles (reviewed_at set)
     limit: int = Query(default=50, le=200),
     offset: int = 0,
     sort_by: Literal[
@@ -54,6 +55,10 @@ def list_articles(
         q = q.filter(Article.relevance == relevance)
     elif not show_off_topic:
         q = q.filter(or_(Article.relevance.is_(None), Article.relevance != "off_topic"))
+
+    # "Vérifié": only articles re-passed through the pipeline (reviewed_at set)
+    if verified:
+        q = q.filter(Article.reviewed_at.isnot(None))
 
     # Filters
     if source:
@@ -200,6 +205,45 @@ def remove_feedback(article_id: int, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(article)
     return article
+
+
+@router.post("/{article_id}/reprocess", response_model=ArticleOut)
+def reprocess_article(article_id: int, db: Session = Depends(get_db)):
+    """
+    Re-run an article through the whole pipeline (gate → enrich → score).
+    Resets it to 'collecte', clears the error counter, and remembers the current
+    score for the old→new display. Used for error recovery or a manual re-check.
+    """
+    article = db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "Article not found")
+    if article.confidence_score is not None:
+        article.previous_confidence_score = article.confidence_score
+    article.reviewed_at = datetime.utcnow()
+    article.error_count = 0
+    article.last_error = None
+    article.status = "collecte"
+    db.commit()
+    db.refresh(article)
+    return article
+
+
+@router.delete("/{article_id}", status_code=204)
+def delete_article(article_id: int, db: Session = Depends(get_db)):
+    """Hard-delete an article and all its dependent rows (same cleanup order as
+    a hard source delete). Clears any cluster references pointing at it."""
+    article = db.get(Article, article_id)
+    if not article:
+        raise HTTPException(404, "Article not found")
+    aid = article_id
+    db.execute(text("DELETE FROM corroborations WHERE article_id = :id OR similar_article_id = :id"), {"id": aid})
+    db.execute(text("DELETE FROM fact_checks  WHERE article_id = :id"), {"id": aid})
+    db.execute(text("DELETE FROM embeddings   WHERE article_id = :id"), {"id": aid})
+    db.execute(text("DELETE FROM articles_tags WHERE article_id = :id"), {"id": aid})
+    db.execute(text("DELETE FROM feedback     WHERE article_id = :id"), {"id": aid})
+    db.execute(text("UPDATE articles SET canonical_id = NULL WHERE canonical_id = :id"), {"id": aid})
+    db.delete(article)
+    db.commit()
 
 
 @router.get("/{article_id}", response_model=ArticleDetail)

@@ -24,6 +24,8 @@ export interface Article {
   status: string;
   pipeline_version: number;         // version that last fully processed this article
   reviewed_at: string | null;       // last idle re-review pass (null = never reviewed)
+  error_count: number;              // consecutive pipeline failures (parked at the cap)
+  last_error: string | null;        // last failure message
   tags: Tag[];
   cluster_size: number;  // >1 = canonical with N-1 similar articles from other sources
 }
@@ -120,6 +122,14 @@ export interface PipelineError {
   at: string;
 }
 
+export interface ErroredArticle {
+  id: number;
+  title: string;
+  status: string;
+  error_count: number;
+  last_error: string | null;
+}
+
 export interface AdminStats {
   pipeline: Record<string, number>;
   pct_enriched: number;
@@ -139,6 +149,8 @@ export interface AdminStats {
   scoring_active: number;
   pipeline_errors: PipelineError[];
   pipeline_error_totals: Record<string, number>;
+  errored_count: number;
+  errored_articles: ErroredArticle[];
   rate_history: RatePoint[];
   embeddings_done: number;
   embeddings_total: number;

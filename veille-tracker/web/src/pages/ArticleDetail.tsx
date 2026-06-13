@@ -54,6 +54,12 @@ export default function ArticleDetail() {
       </div>
 
       <div className="flex flex-wrap gap-2 text-xs text-gray-500 mb-6">
+        <span
+          className="font-mono bg-gray-800 text-gray-300 rounded px-1.5 py-0.5"
+          title="Identifiant de l'article (utile pour le signaler / l'outil admin)"
+        >
+          #{article.id}
+        </span>
         {article.author && <span>{article.author}</span>}
         {article.published_at && <><span>·</span><span>{fmtDate(article.published_at)}</span></>}
         {article.tags.map((t) => (

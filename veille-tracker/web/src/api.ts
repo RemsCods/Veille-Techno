@@ -42,6 +42,14 @@ export const fetchArticles = (
 export const fetchArticle = (id: string) =>
   get<import("./types").ArticleDetail>(`/articles/${id}`);
 
+// Re-run an article through the whole pipeline (error recovery / manual re-check)
+export const reprocessArticle = (id: number) =>
+  req<import("./types").Article>("POST", `/articles/${id}/reprocess`);
+
+// Hard-delete an article and its dependent rows
+export const deleteArticle = (id: number) =>
+  req<void>("DELETE", `/articles/${id}`);
+
 export const fetchSources = () =>
   get<import("./types").Source[]>("/sources");
 

@@ -76,6 +76,8 @@ class Article(Base):
     # The idle reviewer re-sweeps articles with pipeline_version < CURRENT_PIPELINE_VERSION.
     pipeline_version = Column(Integer, nullable=False, default=1)
     reviewed_at      = Column(DateTime)         # last re-review pass (NULL = never reviewed)
+    error_count      = Column(Integer, nullable=False, default=0)  # parked at MAX_PIPELINE_ATTEMPTS
+    last_error       = Column(String(500))      # last failure message (for the admin)
     # Semantic deduplication — NULL = canonical (or not yet clustered)
     canonical_id     = Column(Integer, ForeignKey("articles.id", ondelete="SET NULL"), nullable=True)
     cluster_size     = Column(Integer, nullable=False, default=1)

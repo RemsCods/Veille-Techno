@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS articles (
   -- The idle reviewer re-sweeps articles with pipeline_version < CURRENT_PIPELINE_VERSION.
   pipeline_version SMALLINT NOT NULL DEFAULT 1,
   reviewed_at      DATETIME DEFAULT NULL,     -- last re-review pass (NULL = never reviewed)
+  error_count      INT NOT NULL DEFAULT 0,    -- consecutive pipeline failures; parked at MAX_PIPELINE_ATTEMPTS
+  last_error       VARCHAR(500) DEFAULT NULL, -- last failure message (for the admin)
   canonical_id     INT DEFAULT NULL,          -- NULL = canonical article (or not yet clustered)
   cluster_size     INT NOT NULL DEFAULT 1,    -- number of similar articles from other sources
   FOREIGN KEY (source_id) REFERENCES sources(id),
@@ -46,7 +48,8 @@ CREATE TABLE IF NOT EXISTS articles (
   INDEX idx_score     (confidence_score),
   INDEX idx_relevance (relevance),
   INDEX idx_canonical (canonical_id),
-  INDEX idx_review    (status, pipeline_version)
+  INDEX idx_review    (status, pipeline_version),
+  INDEX idx_error     (error_count)
 );
 
 CREATE TABLE IF NOT EXISTS tags (

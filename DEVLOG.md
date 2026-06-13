@@ -1089,7 +1089,49 @@ structure projet, variables d'env, endpoints `/stats/admin` et `/stats/db`).
 
 ---
 
-## État du projet — juin 2026 (après session 17)
+## Session 18 — 14 juin 2026 : Incident RAM (boucle d'erreur) + gestion des erreurs
+
+### Incident
+Pendant le balayage de re-review (session 17), une **boucle d'erreur a saturé la RAM** de la
+VM (23 Go) ; les conteneurs ont dû être arrêtés (`docker compose down` → logs perdus).
+Diagnostic reconstruit depuis l'état DB (DB relancée seule) : **1 article bloqué en
+`pertinent`**, et après correctifs son `last_error` a révélé la cause —
+**MariaDB error 1020 « Record has changed since last read »** sur l'`UPDATE` du gate
+(conflit de concurrence sur la même ligne). Mécanisme de la boucle :
+
+1. Un article échoue son `UPDATE` (1020) → reste en `collecte`/`enrichi` → **re-claimé à
+   chaque cycle, indéfiniment** (aucun plafond de retry).
+2. Chaque itération appelle `record_embedded()` / `record_*()` → or **les deques de débit de
+   `pipeline_stats` n'étaient vidées que par `snapshot()`** (= un appel à `/stats/admin`).
+   Sans page admin ouverte, elles grossissaient **sans borne** → fuite mémoire. La
+   re-review (session 17) garde la pipeline active en continu → fuite accélérée.
+
+### Correctifs (3 garde-fous)
+- **RAM** : `maxlen` sur toutes les deques de débit (`pipeline_stats.py`) → bornées quoi qu'il
+  arrive.
+- **Boucle** : colonnes `error_count` + `last_error` (migration 004). Les workers
+  incrémentent à l'échec, **excluent `error_count >= MAX_PIPELINE_ATTEMPTS (3)` du claim**
+  (article *parqué*), et **remettent `error_count=0` au succès** (une erreur 1020 transitoire
+  s'auto-répare ; seul un article réellement « poison » est parqué).
+- **Plafond conteneur** : `mem_limit: 2g` sur `app` (docker-compose) → un éventuel emballement
+  est OOM-killé/redémarré au lieu de saturer l'hôte.
+
+### Gestion des erreurs (demande utilisateur)
+- Backend : `POST /articles/{id}/reprocess` (reset `collecte`, `error_count=0`, mémorise
+  l'ancien score) et `DELETE /articles/{id}` (purge corroborations/fact_checks/embeddings/
+  tags/feedback + `canonical_id` orphelins) — testés (cleanup vérifié, 404 géré). Liste des
+  articles parqués exposée dans `/stats/admin` (`errored_count`, `errored_articles`).
+- Admin : carte **« Articles en erreur »** (re-run / supprimer par ligne **et** par n°).
+- Aussi : **#id** affiché sur la fiche article ; filtre **« 🔁 Vérifiés »** au Feed
+  (`reviewed_at IS NOT NULL`).
+
+### Vérifié
+RAM `app` stable (~90 Mo / cap 2 Go), sweep sain (`review_pending` décroît, `reviewed/min`
+actif), endpoints OK. L'article 1633 (erreur 1020 transitoire) se ré-traite et se réinitialise.
+
+---
+
+## État du projet — juin 2026 (après session 18)
 
 ### Fonctionnalités en production
 - ✅ Collecte automatique (~24 sources, RSS + arXiv + HN) — filtre HN corrigé (word boundaries)
@@ -1117,4 +1159,4 @@ structure projet, variables d'env, endpoints `/stats/admin` et `/stats/db`).
 
 ---
 
-*Dernière mise à jour : 13 juin 2026*
+*Dernière mise à jour : 14 juin 2026*

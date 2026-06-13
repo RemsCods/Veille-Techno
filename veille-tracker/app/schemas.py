@@ -78,6 +78,8 @@ class ArticleOut(BaseModel):
     status: str
     pipeline_version: int = 1                # version that last fully processed this article
     reviewed_at: Optional[datetime] = None   # last idle re-review pass (None = never reviewed)
+    error_count: int = 0                     # consecutive pipeline failures (parked at the cap)
+    last_error: Optional[str] = None         # last failure message
     tags: list[TagOut] = []
     cluster_size: int = 1    # >1 means this article is a cluster canonical with duplicates
 

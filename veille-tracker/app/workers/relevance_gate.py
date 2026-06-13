@@ -17,7 +17,8 @@ from database import SessionLocal
 from models import Article, Embedding
 from ollama_client import embed, vector_to_bytes, bytes_to_vector
 from relevance import compute_relevance, bucket_from_margin
-from config import CURRENT_PIPELINE_VERSION
+from config import CURRENT_PIPELINE_VERSION, MAX_PIPELINE_ATTEMPTS
+from workers._errors import bump_error as _bump_error
 from pipeline_stats import stats as _stats
 import numpy as np
 
@@ -31,7 +32,10 @@ def run_relevance_gate(batch: int = 30) -> int:
     with _claim_lock:
         db = SessionLocal()
         try:
-            q = db.query(Article.id).filter(Article.status == "collecte")
+            q = db.query(Article.id).filter(
+                Article.status == "collecte",
+                Article.error_count < MAX_PIPELINE_ATTEMPTS,   # skip parked articles
+            )
             if _claimed_ids:
                 q = q.filter(Article.id.notin_(_claimed_ids))
             ids = [r[0] for r in q.limit(batch).all()]
@@ -57,8 +61,9 @@ def run_relevance_gate(batch: int = 30) -> int:
                 _stats.record_gated()
             except Exception as exc:
                 db.rollback()
-                # Article stays in 'collecte' -> retried next round
+                # Count it (parked after the cap); else stays 'collecte' for retry
                 _stats.record_gate_error(article_id, f"{type(exc).__name__}: {exc}")
+                _bump_error(db, article_id, f"gate: {type(exc).__name__}: {exc}")
     finally:
         with _claim_lock:
             _claimed_ids.difference_update(ids)
@@ -121,6 +126,7 @@ def _gate_article(article: Article, db) -> None:
 
     margin, display_score, anchor = compute_relevance(np.array(vec, dtype=np.float32), db)
 
+    article.error_count = 0   # gate succeeded → reset consecutive-failure counter
     if margin is None:
         # No active anchors -> gate is effectively disabled, let through
         article.status = "pertinent"

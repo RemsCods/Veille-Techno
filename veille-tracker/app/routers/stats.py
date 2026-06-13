@@ -75,6 +75,14 @@ class PipelineErrorOut(BaseModel):
     at: str                         # ISO timestamp
 
 
+class ErroredArticleOut(BaseModel):
+    id: int
+    title: str
+    status: str
+    error_count: int
+    last_error: Optional[str]
+
+
 class AdminStatsOut(BaseModel):
     # Pipeline counts
     pipeline: dict[str, int]
@@ -99,6 +107,9 @@ class AdminStatsOut(BaseModel):
     # Pipeline error details (last 50, newest first) + cumulative totals since startup
     pipeline_errors: list[PipelineErrorOut]
     pipeline_error_totals: dict[str, int]
+    # Persistently-errored articles (error_count > 0) — actionable in the admin
+    errored_count: int
+    errored_articles: list[ErroredArticleOut]
     # Rate history (up to 12 points × 30s = last 6 min) for sparklines
     rate_history: list[RatePoint]
     # Embeddings
@@ -310,6 +321,22 @@ def get_admin_stats(db: Session = Depends(get_db)):
         .scalar() or 0
     )
 
+    # ── Persistently-errored articles (parked after MAX_PIPELINE_ATTEMPTS) ──
+    errored_count = (
+        db.query(func.count(Article.id)).filter(Article.error_count > 0).scalar() or 0
+    )
+    errored_rows = (
+        db.query(Article.id, Article.title, Article.status, Article.error_count, Article.last_error)
+        .filter(Article.error_count > 0)
+        .order_by(Article.error_count.desc(), Article.id.desc())
+        .limit(50)
+        .all()
+    )
+    errored_articles = [
+        ErroredArticleOut(id=r[0], title=r[1], status=r[2], error_count=r[3], last_error=r[4])
+        for r in errored_rows
+    ]
+
     # ── Embeddings ───────────────────────────────────────────────────────
     embeddings_done = db.query(func.count(Embedding.article_id)).scalar() or 0
 
@@ -365,6 +392,8 @@ def get_admin_stats(db: Session = Depends(get_db)):
         review_pending=int(review_pending),
         reviewed_count=int(reviewed_count),
         reviewed_per_min=rates["reviewed_per_min"],
+        errored_count=int(errored_count),
+        errored_articles=errored_articles,
         corroboration_coverage=corr_coverage,
         fact_check_coverage=fc_coverage,
         top_tags=top_tags,

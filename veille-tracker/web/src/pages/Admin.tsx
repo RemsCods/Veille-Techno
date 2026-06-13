@@ -5,8 +5,9 @@ import {
   createSource, updateSource, deleteSource, collectSource,
   fetchAnchors, createAnchor, patchAnchor, deleteAnchor,
   fetchMlModel, retrainModel,
+  reprocessArticle, deleteArticle,
 } from "../api";
-import type { SourceAdmin, SourceCreatePayload } from "../types";
+import type { SourceAdmin, SourceCreatePayload, ErroredArticle } from "../types";
 
 // ── Reusable primitives ───────────────────────────────────────────────────────
 
@@ -442,6 +443,96 @@ function MlCard({ feedbackCount }: { feedbackCount: number }) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
+// Errored-articles panel (re-run / delete per row) + by-ID tools — features B & C.
+function ArticleOpsCard({ errored }: { errored: ErroredArticle[] }) {
+  const qc = useQueryClient();
+  const [idInput, setIdInput] = useState("");
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [confirmId, setConfirmId] = useState<number | null>(null);
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["admin-stats"] });
+    qc.invalidateQueries({ queryKey: ["articles"] });
+  };
+  const reprocessMut = useMutation({
+    mutationFn: reprocessArticle,
+    onSuccess: (_d, id) => { setMsg({ ok: true, text: `Article #${id} renvoyé dans la pipeline.` }); invalidate(); },
+    onError: (e: Error) => setMsg({ ok: false, text: String(e.message) }),
+  });
+  const deleteMut = useMutation({
+    mutationFn: deleteArticle,
+    onSuccess: (_d, id) => { setMsg({ ok: true, text: `Article #${id} supprimé.` }); setConfirmId(null); invalidate(); },
+    onError: (e: Error) => setMsg({ ok: false, text: String(e.message) }),
+  });
+
+  function runById(action: "reprocess" | "delete") {
+    const id = parseInt(idInput, 10);
+    if (!Number.isFinite(id) || id <= 0) { setMsg({ ok: false, text: "Entre un numéro d'article valide." }); return; }
+    if (action === "reprocess") reprocessMut.mutate(id);
+    else deleteMut.mutate(id);
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-lg p-5 space-y-4">
+      <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">
+        Articles en erreur
+        <span className="text-gray-600 font-normal ml-2 normal-case">
+          {errored.length === 0 ? "aucun" : `${errored.length} parqué${errored.length > 1 ? "s" : ""}`} ·
+          repasse ou supprime par n°
+        </span>
+      </h2>
+
+      {/* By-ID tools (feature C) */}
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="number"
+          value={idInput}
+          onChange={(e) => setIdInput(e.target.value)}
+          placeholder="n° d'article"
+          className="bg-gray-950 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 w-36 focus:outline-none focus:border-indigo-600"
+        />
+        <button onClick={() => runById("reprocess")} disabled={reprocessMut.isPending}
+          className="px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 text-sm disabled:opacity-50">↻ Re-run</button>
+        <button onClick={() => runById("delete")} disabled={deleteMut.isPending}
+          className="px-3 py-1.5 rounded bg-red-800 hover:bg-red-700 text-sm disabled:opacity-50">🗑 Supprimer</button>
+        {msg && <span className={`text-xs ${msg.ok ? "text-emerald-400" : "text-red-400"}`}>{msg.text}</span>}
+      </div>
+
+      {/* Errored list (feature B) */}
+      {errored.length === 0 ? (
+        <p className="text-xs text-gray-600">Aucun article parqué en erreur 🎉</p>
+      ) : (
+        <div className="space-y-1.5 max-h-80 overflow-y-auto">
+          {errored.map((a) => (
+            <div key={a.id} className="rounded bg-gray-950 border border-gray-800 px-3 py-2 text-xs">
+              <div className="flex items-center gap-2">
+                <a href={`/articles/${a.id}`} className="font-mono text-indigo-400 hover:text-indigo-300 shrink-0">#{a.id}</a>
+                <span className="px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 shrink-0">{a.status}</span>
+                <span className="text-red-400 shrink-0" title="nombre d'échecs">×{a.error_count}</span>
+                <span className="text-gray-300 truncate flex-1">{a.title}</span>
+                <button onClick={() => reprocessMut.mutate(a.id)} disabled={reprocessMut.isPending}
+                  className="text-indigo-400 hover:text-indigo-300 shrink-0">↻</button>
+                {confirmId === a.id ? (
+                  <>
+                    <button onClick={() => deleteMut.mutate(a.id)} className="text-red-400 hover:text-red-300 shrink-0">confirmer</button>
+                    <button onClick={() => setConfirmId(null)} className="text-gray-500 hover:text-gray-300 shrink-0">×</button>
+                  </>
+                ) : (
+                  <button onClick={() => setConfirmId(a.id)} className="text-gray-500 hover:text-red-400 shrink-0">🗑</button>
+                )}
+              </div>
+              {a.last_error && (
+                <pre className="mt-1 text-amber-200/60 whitespace-pre-wrap break-all font-mono leading-relaxed">{a.last_error}</pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export default function Admin() {
   const queryClient = useQueryClient();
 
@@ -772,6 +863,9 @@ export default function Admin() {
           au repos (cède toujours la priorité à une vraie collecte)
         </p>
       </div>
+
+      {/* ── Articles en erreur (re-run / delete) ─────────────────────────── */}
+      <ArticleOpsCard errored={data.errored_articles} />
 
       {/* ── Score distribution + Quality ─────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

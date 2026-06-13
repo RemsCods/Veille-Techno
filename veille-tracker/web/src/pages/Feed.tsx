@@ -22,6 +22,7 @@ export default function Feed() {
   const [activeTags, setActiveTags]   = useState<string[]>([]);
   const [showDupes, setShowDupes]     = useState(false);
   const [showOffTopic, setShowOffTopic] = useState(false);
+  const [verifiedOnly, setVerifiedOnly] = useState(false); // re-reviewed articles only
   const [reviewMode, setReviewMode]   = useState(false); // "À trier" — uncertainty queue
   const limit = 20;
 
@@ -43,6 +44,7 @@ export default function Feed() {
   // least sure about, so each 👍/👎 teaches the model the most.
   params.set("sort_by",  reviewMode ? "uncertainty" : sortBy);
   params.set("sort_dir", reviewMode ? "asc" : sortDir);
+  if (verifiedOnly) params.set("verified", "true");
   params.set("limit",    String(limit));
   params.set("offset",   String(page * limit));
 
@@ -88,6 +90,7 @@ export default function Feed() {
     setActiveTags([]);
     setShowDupes(false);
     setShowOffTopic(false);
+    setVerifiedOnly(false);
     setReviewMode(false);
     setPage(0);
   }
@@ -95,7 +98,7 @@ export default function Feed() {
   const hasActiveFilters =
     search || minScore || sourceFilter ||
     sort !== "collected_at:desc" || activeTags.length > 0 || showDupes ||
-    showOffTopic || reviewMode;
+    showOffTopic || verifiedOnly || reviewMode;
 
   function toggleTag(name: string) {
     setPage(0);
@@ -250,6 +253,17 @@ export default function Feed() {
             className="w-3.5 h-3.5 accent-red-500"
           />
           Show off-topic
+        </label>
+
+        {/* Verified — only articles re-passed through the pipeline (reviewed_at set) */}
+        <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none" title="N'afficher que les articles repassés par la pipeline (badge 🔁)">
+          <input
+            type="checkbox"
+            checked={verifiedOnly}
+            onChange={(e) => { setVerifiedOnly(e.target.checked); setPage(0); }}
+            className="w-3.5 h-3.5 accent-indigo-500"
+          />
+          🔁 Vérifiés
         </label>
 
         {hasActiveFilters && (
