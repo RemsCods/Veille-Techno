@@ -64,6 +64,7 @@ def _continuous_pipeline() -> None:
     from workers.reviewer import run_reviewer
 
     pool = ThreadPoolExecutor(max_workers=9, thread_name_prefix="pipeline")
+    _last_review_ts = 0.0   # monotonic time of the last re-review burst
 
     while not _pipeline_stop.is_set():
         try:
@@ -93,12 +94,20 @@ def _continuous_pipeline() -> None:
             # idempotent), which would otherwise mask the idle state and starve
             # the re-review forever.
             if n_gated == 0 and n_enriched == 0 and n_scored == 0 and n_embedded == 0:
-                # Pipeline idle → re-inject a small batch of legacy articles for
-                # re-review (re-enrich + re-score). Self-throttled: injecting
-                # makes the next loop non-idle, so nothing more is injected until
-                # the batch drains, and a real collection always takes priority.
-                n_review = run_reviewer(settings.review_batch) if settings.review_enabled else 0
-                if n_review == 0:
+                # Pipeline caught up → re-review, but as a RESTING TRICKLE: at most
+                # one burst every review_interval_seconds, so the pipeline visibly
+                # rests at 100% between bursts and the re-review stays clearly
+                # secondary (run_reviewer itself still yields to fresh work / a
+                # recent collection, and fresh keeps claim-priority).
+                now = _time.monotonic()
+                due = (
+                    settings.review_enabled
+                    and (now - _last_review_ts) >= settings.review_interval_seconds
+                )
+                n_review = run_reviewer(settings.review_batch) if due else 0
+                if n_review > 0:
+                    _last_review_ts = now
+                else:
                     _pipeline_stop.wait(timeout=15)
         except Exception:
             _pipeline_stop.wait(timeout=10)

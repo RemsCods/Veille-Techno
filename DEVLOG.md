@@ -1200,7 +1200,33 @@ déjà 75 par claim en priorité.
 
 ---
 
-## État du projet — juin 2026 (après session 20)
+## Session 21 — 14 juin 2026 : Vrai 100% de progression + re-review au repos
+
+### Problème (perception)
+La barre de progression plafonnait à ~97 % et la re-review tournait en continu à 8/min
+(« 8 in progress »), donnant l'impression que la principale était bridée et que la re-review
+s'allumait avant 100 %. En réalité la principale était **à jour** (`collecte:0, pertinent:0`) ;
+la principale monte bien à 18-20/min et « 75 in progress » pendant un vrai pull (confirmé).
+
+### Causes + corrections
+- **Barre bloquée à ~97 %** : le dénominateur incluait les `hors_sujet` (jamais scorés) et le
+  compte `status='score'` chutait quand la re-review repassait des articles `score → pertinent`.
+  Fix (`routers/stats.py`) : progression sur `processable = total − hors_sujet`, comptée par
+  **« a déjà été traité »** (`confidence_score IS NOT NULL` / `summary IS NOT NULL`, en excluant
+  `hors_sujet` des deux — un article re-injecté garde son score donc ne fait plus chuter la barre).
+  Atteint un **100 % stable**. Champs API ajoutés : `processable`, `scored_done`, `enriched_done`.
+  (Piège corrigé : des `hors_sujet` gardent un ancien `confidence_score` → il fallait les exclure
+  aussi du `scored_done`, sinon >100 %.)
+- **Re-review en continu** : `review_interval_seconds` (240) — un burst de 8 au maximum toutes
+  les ~4 min (`scheduler.py` mémorise `_last_review_ts`), sinon la pipeline se repose (0/min,
+  affichée à 100 %). La re-review devient clairement secondaire sans monopoliser le GPU. On garde
+  yield-frais + cooldown collecte + priorité de claim.
+- **Débit ~8/min** : c'est le plafond GPU (3 appels LLM/article, ~2 contextes // sur 16 Go), pas
+  une limite de batch (déjà 75) — hors scope.
+
+---
+
+## État du projet — juin 2026 (après session 21)
 
 ### Fonctionnalités en production
 - ✅ Collecte automatique (~24 sources, RSS + arXiv + HN) — filtre HN corrigé (word boundaries)

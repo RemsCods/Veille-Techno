@@ -88,6 +88,9 @@ class AdminStatsOut(BaseModel):
     pipeline: dict[str, int]
     pct_enriched: float
     pct_scored: float
+    processable: int        # total − hors_sujet (articles that should reach 'score')
+    enriched_done: int      # processable articles with a summary
+    scored_done: int        # processable articles with a confidence_score (stable during re-review)
     # Quality
     reliable_count: int
     pct_reliable: float
@@ -158,6 +161,24 @@ def get_admin_stats(db: Session = Depends(get_db)):
     total = sum(by_status.values())
     n_enrichi = by_status.get("enrichi", 0)
     n_score   = by_status.get("score", 0)
+
+    # Progress is measured over PROCESSABLE articles (hors_sujet never reach
+    # 'score' by design) and by "has been processed" (confidence_score/summary
+    # present), NOT by current status — so the re-review sending scored articles
+    # back to 'pertinent' doesn't make the bars dip. Reaches a stable 100% when
+    # the main pipeline is caught up.
+    hors_sujet_n  = by_status.get("hors_sujet", 0)
+    processable   = max(total - hors_sujet_n, 0)
+    scored_done   = (
+        db.query(func.count(Article.id))
+        .filter(Article.confidence_score.isnot(None), Article.status != "hors_sujet")
+        .scalar() or 0
+    )
+    enriched_done = (
+        db.query(func.count(Article.id))
+        .filter(Article.summary.isnot(None), Article.status != "hors_sujet")
+        .scalar() or 0
+    )
 
     reliable = (
         db.query(func.count(Article.id))
@@ -344,12 +365,10 @@ def get_admin_stats(db: Session = Depends(get_db)):
     from pipeline_stats import stats as _stats
     rates = _stats.snapshot()
 
-    pending_enrich     = (
-        by_status.get("collecte", 0)
-        + by_status.get("pertinent", 0)
-        + by_status.get("processing", 0)
-    )
-    pending_score      = pending_enrich + n_enrichi
+    # Pending = processable articles not yet enriched/scored (≈0 when caught up,
+    # regardless of re-review activity — re-injected articles already count as done).
+    pending_enrich     = max(processable - enriched_done, 0)
+    pending_score      = max(processable - scored_done, 0)
     embeddings_missing = total - embeddings_done
 
     eta_embed  = round(embeddings_missing / rates["embedded_per_min"],  1) if rates["embedded_per_min"]  > 0 and embeddings_missing > 0 else None
@@ -358,8 +377,11 @@ def get_admin_stats(db: Session = Depends(get_db)):
 
     return AdminStatsOut(
         pipeline={**by_status, "total": total},
-        pct_enriched=round((n_enrichi + n_score) / total * 100, 1) if total else 0.0,
-        pct_scored=round(n_score / total * 100, 1) if total else 0.0,
+        pct_enriched=round(enriched_done / processable * 100, 1) if processable else 100.0,
+        pct_scored=round(scored_done / processable * 100, 1) if processable else 100.0,
+        processable=processable,
+        enriched_done=enriched_done,
+        scored_done=scored_done,
         reliable_count=reliable,
         pct_reliable=round(reliable / total * 100, 1) if total else 0.0,
         avg_score=round(float(avg), 1) if avg is not None else None,

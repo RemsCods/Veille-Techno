@@ -57,8 +57,9 @@ class Settings(BaseSettings):
     # Idle re-review: when the pipeline has nothing else to do, re-inject a
     # small flow of legacy scored articles to re-enrich + re-score them.
     review_enabled: bool = True
-    review_batch: int = 8     # articles re-injected per idle cycle (self-throttled — only runs when idle)
+    review_batch: int = 8     # articles re-injected per re-review burst
     review_cooldown_minutes: int = 5   # re-review also pauses while a collection ran this recently (give fresh a clear runway)
+    review_interval_seconds: int = 240  # minimum gap between re-review bursts → the pipeline rests at 100% between them (clearly secondary, doesn't monopolise the GPU)
 
     @property
     def database_url(self) -> str:

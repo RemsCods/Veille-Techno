@@ -756,7 +756,7 @@ export default function Admin() {
                 {data.eta_enrich_min !== null && (
                   <span className="text-gray-500">ETA ~{fmtEta(data.eta_enrich_min)}</span>
                 )}
-                <span className="text-blue-400">{fmtNum(enrichi + scored)} / {fmtNum(total)} — {data.pct_enriched}%</span>
+                <span className="text-blue-400">{fmtNum(data.enriched_done)} / {fmtNum(data.processable)} — {data.pct_enriched}%</span>
               </span>
             </div>
             <ProgressBar pct={data.pct_enriched} color="bg-blue-500" />
@@ -783,7 +783,7 @@ export default function Admin() {
                 {data.eta_score_min !== null && (
                   <span className="text-gray-500">ETA ~{fmtEta(data.eta_score_min)}</span>
                 )}
-                <span className="text-green-400">{fmtNum(scored)} / {fmtNum(total)} — {data.pct_scored}%</span>
+                <span className="text-green-400">{fmtNum(data.scored_done)} / {fmtNum(data.processable)} — {data.pct_scored}%</span>
               </span>
             </div>
             <ProgressBar pct={data.pct_scored} color="bg-green-500" />

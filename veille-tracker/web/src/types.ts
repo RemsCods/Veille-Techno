@@ -134,6 +134,9 @@ export interface AdminStats {
   pipeline: Record<string, number>;
   pct_enriched: number;
   pct_scored: number;
+  processable: number;     // total − hors_sujet (denominator for progress)
+  enriched_done: number;
+  scored_done: number;
   reliable_count: number;
   pct_reliable: number;
   avg_score: number | null;
