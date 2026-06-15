@@ -57,9 +57,9 @@ class Settings(BaseSettings):
     # Idle re-review: when the pipeline has nothing else to do, re-inject a
     # small flow of legacy scored articles to re-enrich + re-score them.
     review_enabled: bool = True
-    review_batch: int = 8     # articles re-injected per re-review burst
+    review_batch: int = 25    # articles re-injected per re-review burst (drains in ~3 min at the GPU ceiling)
     review_cooldown_minutes: int = 5   # re-review also pauses while a collection ran this recently (give fresh a clear runway)
-    review_interval_seconds: int = 240  # minimum gap between re-review bursts → the pipeline rests at 100% between them (clearly secondary, doesn't monopolise the GPU)
+    review_interval_seconds: int = 60  # minimum gap between re-review bursts. Short on purpose: a batch of 25 takes ~3 min to drain (which itself keeps the pipeline non-idle), so the burst cadence is drain-bound, not interval-bound — visible, steady progress while still yielding to fresh work + the post-collection cooldown
 
     @property
     def database_url(self) -> str:

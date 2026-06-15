@@ -575,9 +575,9 @@ RELEVANCE_T_HIGH=0.05                  # ≥ this → on_topic
 
 # Idle re-review
 REVIEW_ENABLED=true
-REVIEW_BATCH=8                         # legacy articles re-injected per idle burst
+REVIEW_BATCH=25                        # legacy articles re-injected per idle burst
 REVIEW_COOLDOWN_MINUTES=5              # reviewer also pauses this long after any collection
-REVIEW_INTERVAL_SECONDS=240            # minimum gap between re-review bursts (rests at 100% in between)
+REVIEW_INTERVAL_SECONDS=60             # minimum gap between re-review bursts (cadence is drain-bound at this value)
 ```
 
 > A pipeline-stage failure also bumps `articles.error_count`; after `MAX_PIPELINE_ATTEMPTS` (`config.py`,
