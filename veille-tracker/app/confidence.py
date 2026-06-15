@@ -10,6 +10,13 @@ from sqlalchemy.orm import Session
 from config import settings
 from models import Article, Embedding, Corroboration, FactCheck
 from ollama_client import chat, chat_with_model, bytes_to_vector
+from errors import with_db_retry
+
+# Serializes the brief fact_checks write across scorer threads. The slow LLM
+# calls run in parallel (outside the lock); only the few-ms DELETE+INSERT+commit
+# is serialized, which removes the in-process deadlock on fact_checks
+# (FK fact_checks→articles caused circular lock waits between scorer threads).
+_fact_check_write_lock = threading.Lock()
 
 # ── In-memory embedding cache ─────────────────────────────────────────────────
 # Shared across all scorer threads. Refreshed every 30 s.
@@ -218,31 +225,38 @@ def score_fact_check(article: Article, db: Session) -> float:
 
     Falls back gracefully if either model is unavailable.
     """
-    # Idempotent: clean up previous run before inserting fresh results
-    db.query(FactCheck).filter(FactCheck.article_id == article.id).delete()
-
     text = (article.content or article.summary or "")[:2000]
-    if not text.strip():
-        return 60.0
 
     model_a = settings.ollama_chat_model       # qwen3.5:9b
     model_b = settings.ollama_factcheck_model  # gemma4:e4b
 
-    claims_a = _run_factcheck_model(article.title, text, model_a)
-    claims_b = _run_factcheck_model(article.title, text, model_b)  # llama3.2:3b — fits in remaining VRAM
+    # Slow LLM calls happen here, OUTSIDE any DB transaction/lock. (Previously
+    # the cleanup DELETE ran first and held its locks across these calls, which
+    # is what made the fact_checks INSERT deadlock under concurrent scorers.)
+    if text.strip():
+        claims_a = _run_factcheck_model(article.title, text, model_a)
+        claims_b = _run_factcheck_model(article.title, text, model_b)  # fits in remaining VRAM
+        merged = _merge_factcheck_claims(claims_a, model_a, claims_b, model_b)
+    else:
+        merged = []
 
-    merged = _merge_factcheck_claims(claims_a, model_a, claims_b, model_b)
+    # Idempotent DELETE-then-INSERT, kept brief and serialized+retried so the
+    # FK to articles can't trigger circular lock waits between scorer threads.
+    def _write_fact_checks():
+        db.query(FactCheck).filter(FactCheck.article_id == article.id).delete()
+        for c in merged:
+            db.add(FactCheck(
+                article_id=article.id,
+                claim=c["text"],
+                verifiable=c["status"] != "unverifiable",
+                supporting_sources=c["status"],
+                fact_check_models=c["models"],
+                secondary_status=c["secondary_status"],
+            ))
+        db.commit()
 
-    for c in merged:
-        db.add(FactCheck(
-            article_id=article.id,
-            claim=c["text"],
-            verifiable=c["status"] != "unverifiable",
-            supporting_sources=c["status"],
-            fact_check_models=c["models"],
-            secondary_status=c["secondary_status"],
-        ))
-    db.commit()
+    with _fact_check_write_lock:
+        with_db_retry(_write_fact_checks, on_retry=db.rollback)
 
     if not merged:
         return 60.0

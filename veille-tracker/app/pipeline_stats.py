@@ -3,6 +3,8 @@ import time
 from collections import deque
 from datetime import datetime
 
+from errors import classify_error
+
 
 # Hard cap on each rate deque. The rate window is 60s, so legitimate counts are
 # at most a few hundred per deque; this maxlen is a safety bound so the deques
@@ -28,9 +30,11 @@ class PipelineStats:
         self._last_history_t: float = 0.0
         # Error detail buffer — the per-minute rates alone were useless for
         # debugging: a burst would show "err/min" for 60s then vanish with no
-        # trace of WHAT failed. Keep the last 50 messages + cumulative totals.
+        # trace of WHAT failed. Keep the last 50 classified errors, cumulative
+        # totals per stage, and an aggregate per CAUSE (the "biggest cause").
         self._error_log: deque = deque(maxlen=50)
         self._error_totals: dict[str, int] = {}
+        self._error_by_category: dict[str, dict] = {}
 
     def record_enriched(self, n: int = 1) -> None:
         now = time.monotonic()
@@ -62,29 +66,49 @@ class PipelineStats:
             for _ in range(n):
                 self._reviewed.append(now)
 
-    def record_enrich_error(self, article_id: int | None = None, message: str = "") -> None:
+    def record_enrich_error(self, article_id: int | None = None, exc=None, context: str = "") -> None:
         now = time.monotonic()
         with self._lock:
             self._enrich_errors.append(now)
-        self._log_error("enrich", article_id, message)
+        self._log_error("enrich", article_id, exc, context)
 
-    def record_score_error(self, article_id: int | None = None, message: str = "") -> None:
+    def record_score_error(self, article_id: int | None = None, exc=None, context: str = "") -> None:
         now = time.monotonic()
         with self._lock:
             self._score_errors.append(now)
-        self._log_error("score", article_id, message)
+        self._log_error("score", article_id, exc, context)
 
-    def record_gate_error(self, article_id: int | None = None, message: str = "") -> None:
-        self._log_error("gate", article_id, message)
+    def record_gate_error(self, article_id: int | None = None, exc=None, context: str = "") -> None:
+        self._log_error("gate", article_id, exc, context)
 
-    def _log_error(self, stage: str, article_id: int | None, message: str) -> None:
+    def _log_error(self, stage: str, article_id: int | None, exc, context: str = "") -> None:
+        info = classify_error(exc, context)
+        at = datetime.utcnow().isoformat()
         with self._lock:
             self._error_totals[stage] = self._error_totals.get(stage, 0) + 1
+            cat = info["category"]
+            bucket = self._error_by_category.get(cat)
+            if bucket is None:
+                self._error_by_category[cat] = {
+                    "category":  cat,
+                    "severity":  info["severity"],
+                    "count":     1,
+                    "last_seen": at,
+                    "sample":    info["summary"],
+                }
+            else:
+                bucket["count"]    += 1
+                bucket["severity"]  = info["severity"]   # same category → stable severity
+                bucket["last_seen"] = at
+                bucket["sample"]    = info["summary"]
             self._error_log.append({
                 "stage":      stage,
                 "article_id": article_id,
-                "message":    (message or "unknown error")[:500],
-                "at":         datetime.utcnow().isoformat(),
+                "category":   info["category"],
+                "severity":   info["severity"],
+                "summary":    info["summary"],
+                "detail":     info["detail"],
+                "at":         at,
             })
 
     def set_scoring_active(self, n: int) -> None:
@@ -127,6 +151,12 @@ class PipelineStats:
             rates["history"] = list(self._history)
             rates["recent_errors"] = list(self._error_log)[::-1]  # newest first
             rates["error_totals"]  = dict(self._error_totals)
+            # Aggregate by cause, biggest first — the "where do errors come from"
+            rates["error_categories"] = sorted(
+                (dict(c) for c in self._error_by_category.values()),
+                key=lambda c: c["count"],
+                reverse=True,
+            )
         return rates
 
 

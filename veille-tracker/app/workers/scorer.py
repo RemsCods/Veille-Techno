@@ -62,7 +62,7 @@ def run_scorer(batch: int = 25) -> int:
                 _stats.record_scored()
             except Exception as exc:
                 db.rollback()
-                _stats.record_score_error(article_id, f"{type(exc).__name__}: {exc}")
+                _stats.record_score_error(article_id, exc)
                 _bump_error(db, article_id, f"score: {type(exc).__name__}: {exc}")
     finally:
         _stats.adjust_scoring_active(-len(ids))

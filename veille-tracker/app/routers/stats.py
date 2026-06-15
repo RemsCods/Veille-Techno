@@ -71,8 +71,19 @@ class LogAdminOut(BaseModel):
 class PipelineErrorOut(BaseModel):
     stage: str                      # gate | enrich | score
     article_id: Optional[int]
-    message: str
+    category: str                   # db_deadlock | llm_timeout | llm_json | ...
+    severity: str                   # transient | warning | error | critical
+    summary: str                    # short human-readable line
+    detail: str                     # raw "Type: message" (truncated)
     at: str                         # ISO timestamp
+
+
+class ErrorCategoryOut(BaseModel):
+    category: str
+    severity: str
+    count: int
+    last_seen: str
+    sample: str                     # example summary for this cause
 
 
 class ErroredArticleOut(BaseModel):
@@ -110,6 +121,8 @@ class AdminStatsOut(BaseModel):
     # Pipeline error details (last 50, newest first) + cumulative totals since startup
     pipeline_errors: list[PipelineErrorOut]
     pipeline_error_totals: dict[str, int]
+    # Errors aggregated by cause, biggest first (the dominant cause + its severity)
+    pipeline_error_categories: list[ErrorCategoryOut]
     # Persistently-errored articles (error_count > 0) — actionable in the admin
     errored_count: int
     errored_articles: list[ErroredArticleOut]
@@ -397,6 +410,7 @@ def get_admin_stats(db: Session = Depends(get_db)):
         scoring_active=rates["scoring_active"],
         pipeline_errors=[PipelineErrorOut(**e) for e in rates["recent_errors"]],
         pipeline_error_totals=rates["error_totals"],
+        pipeline_error_categories=[ErrorCategoryOut(**c) for c in rates["error_categories"]],
         rate_history=[RatePoint(**h) for h in rates["history"]],
         embeddings_done=embeddings_done,
         embeddings_total=total,

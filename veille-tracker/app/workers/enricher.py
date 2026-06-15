@@ -52,7 +52,7 @@ def enrich_article(article: Article, db: Session) -> None:
         # page shows WHY instead of a silent quality drop.
         article.summary = (article.content or "")[:300]
         tag_names = []
-        _stats.record_enrich_error(article.id, f"LLM fallback: {type(exc).__name__}: {exc}")
+        _stats.record_enrich_error(article.id, exc, context="LLM fallback")
 
     for name in normalize_tag_list(tag_names[:8]):   # normalize before storing
         tag = db.query(Tag).filter(Tag.name == name).first()
@@ -133,7 +133,7 @@ def run_enricher(batch: int = 25) -> int:
                 _stats.record_enriched()
             except Exception as exc:
                 db.rollback()
-                _stats.record_enrich_error(article_id, f"{type(exc).__name__}: {exc}")
+                _stats.record_enrich_error(article_id, exc)
                 # Count the failure and revert to 'pertinent' for retry; once
                 # error_count hits the cap the claim query stops picking it up.
                 try:

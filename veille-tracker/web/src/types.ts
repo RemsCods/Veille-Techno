@@ -115,11 +115,24 @@ export interface LogAdmin {
   errors: string | null;
 }
 
+export type ErrorSeverity = "transient" | "warning" | "error" | "critical";
+
 export interface PipelineError {
   stage: string;             // gate | enrich | score
   article_id: number | null;
-  message: string;
+  category: string;          // db_deadlock | llm_timeout | llm_json | ...
+  severity: string;          // transient | warning | error | critical
+  summary: string;           // short human-readable line
+  detail: string;            // raw "Type: message" (truncated)
   at: string;
+}
+
+export interface ErrorCategory {
+  category: string;
+  severity: string;
+  count: number;
+  last_seen: string;
+  sample: string;
 }
 
 export interface ErroredArticle {
@@ -152,6 +165,7 @@ export interface AdminStats {
   scoring_active: number;
   pipeline_errors: PipelineError[];
   pipeline_error_totals: Record<string, number>;
+  pipeline_error_categories: ErrorCategory[];
   errored_count: number;
   errored_articles: ErroredArticle[];
   rate_history: RatePoint[];

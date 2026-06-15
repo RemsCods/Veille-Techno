@@ -98,6 +98,29 @@ function fmtDate(iso: string | null) {
   });
 }
 
+// Tailwind classes per severity (badge + card border + bar). Higher = redder.
+const SEVERITY_STYLE: Record<string, { badge: string; card: string; bar: string; label: string }> = {
+  transient: { badge: "bg-slate-700/60 text-slate-300", card: "bg-slate-900/30 border-slate-700/40", bar: "bg-slate-500", label: "transitoire" },
+  warning:   { badge: "bg-amber-900/50 text-amber-300", card: "bg-amber-950/40 border-amber-900/30", bar: "bg-amber-500", label: "avertissement" },
+  error:     { badge: "bg-red-900/50 text-red-300",     card: "bg-red-950/40 border-red-900/40",     bar: "bg-red-500",   label: "erreur" },
+  critical:  { badge: "bg-red-700/70 text-red-100",     card: "bg-red-950/70 border-red-700/60",     bar: "bg-red-400",   label: "critique" },
+};
+const severityStyle = (sev: string) => SEVERITY_STYLE[sev] ?? SEVERITY_STYLE.error;
+
+// Human-readable French label per error category.
+const CATEGORY_LABEL: Record<string, string> = {
+  db_deadlock:     "Deadlock base de données",
+  db_lock_timeout: "Verrou base de données (timeout)",
+  db_connection:   "Connexion base perdue",
+  db_error:        "Erreur base de données",
+  llm_timeout:     "Délai modèle (Ollama)",
+  llm_json:        "Réponse modèle invalide (JSON)",
+  llm_unavailable: "Modèle (Ollama) indisponible",
+  http_error:      "Erreur HTTP externe",
+  unknown:         "Non classée",
+};
+const categoryLabel = (cat: string) => CATEGORY_LABEL[cat] ?? cat;
+
 function fmtNum(n: number) {
   return n.toLocaleString("en-US");
 }
@@ -653,41 +676,83 @@ export default function Admin() {
         </details>
       )}
 
-      {/* ── Pipeline errors (enrich/score/gate) ──────────────────────────── */}
-      {/* Before: only err/min rates were shown, with no detail anywhere — a
-          burst would flash "err/min" for 60s then vanish without a trace. */}
+      {/* ── Pipeline errors — grouped by cause, coloured by severity ─────── */}
+      {/* Before: a flat chronological dump of raw tracebacks — impossible to
+          tell the dominant cause or its gravity at a glance. Now: a ranked
+          "biggest cause" breakdown + readable summaries with detail on demand. */}
       {totalPipelineErrors > 0 && (
         <details className="bg-amber-950/30 border border-amber-800/50 rounded-lg">
-          <summary className="flex items-center gap-2 px-4 py-3 text-sm text-amber-300 cursor-pointer select-none list-none">
+          <summary className="flex flex-wrap items-center gap-2 px-4 py-3 text-sm text-amber-300 cursor-pointer select-none list-none">
             <span className="text-amber-500 text-base">⚠</span>
             <span className="font-medium">
               {totalPipelineErrors} pipeline error{totalPipelineErrors > 1 ? "s" : ""} since startup
             </span>
-            <span className="text-amber-700/80 text-xs">
-              {Object.entries(data.pipeline_error_totals).map(([k, v]) => `${k}: ${v}`).join(" · ")}
-            </span>
+            {data.pipeline_error_categories.length > 0 && (
+              <span className="text-amber-700/80 text-xs">
+                cause principale : {categoryLabel(data.pipeline_error_categories[0].category)} ({data.pipeline_error_categories[0].count})
+              </span>
+            )}
             <span className="ml-auto text-amber-700 text-xs">click to expand</span>
           </summary>
-          <div className="px-4 pb-4 space-y-1.5 max-h-72 overflow-y-auto">
-            {data.pipeline_errors.map((e, i) => (
-              <div key={i} className="rounded bg-amber-950/40 border border-amber-900/30 px-3 py-2 text-xs">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-300 font-mono">{e.stage}</span>
-                  {e.article_id !== null && (
-                    <a href={`/articles/${e.article_id}`} className="text-indigo-400 hover:text-indigo-300">
-                      article #{e.article_id}
-                    </a>
-                  )}
-                  <span className="ml-auto text-gray-600">{fmtDate(e.at)}</span>
-                </div>
-                <pre className="text-amber-200/70 whitespace-pre-wrap break-all font-mono leading-relaxed">{e.message}</pre>
+
+          <div className="px-4 pb-4 space-y-4">
+            {/* Biggest cause first — ranked by count, coloured by severity */}
+            {data.pipeline_error_categories.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-xs uppercase tracking-wide text-gray-500">Répartition par cause</p>
+                {data.pipeline_error_categories.map((c) => {
+                  const st = severityStyle(c.severity);
+                  const pct = Math.round((c.count / totalPipelineErrors) * 100);
+                  return (
+                    <div key={c.category} className={`rounded border px-3 py-2 ${st.card}`}>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className={`px-1.5 py-0.5 rounded font-mono ${st.badge}`}>{st.label}</span>
+                        <span className="font-medium text-gray-200">{categoryLabel(c.category)}</span>
+                        <span className="ml-auto tabular-nums text-gray-300">{c.count} · {pct}%</span>
+                      </div>
+                      <div className="mt-1.5 h-1 rounded bg-black/30 overflow-hidden">
+                        <div className={`h-full ${st.bar} opacity-70`} style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))}
-            {data.pipeline_errors.length === 0 && (
-              <p className="text-xs text-gray-500 pb-2">
-                Aucune erreur récente en mémoire (les compteurs cumulés datent du démarrage du conteneur).
-              </p>
             )}
+
+            {/* Most recent errors — readable summary, raw detail on demand */}
+            <div className="space-y-1.5">
+              <p className="text-xs uppercase tracking-wide text-gray-500">Dernières erreurs</p>
+              <div className="space-y-1.5 max-h-72 overflow-y-auto">
+                {data.pipeline_errors.map((e, i) => {
+                  const st = severityStyle(e.severity);
+                  return (
+                    <div key={i} className={`rounded border px-3 py-2 text-xs ${st.card}`}>
+                      <div className="flex flex-wrap items-center gap-2 mb-1">
+                        <span className={`px-1.5 py-0.5 rounded font-mono ${st.badge}`}>{st.label}</span>
+                        <span className="text-gray-500 font-mono">{e.stage}</span>
+                        <span className="text-gray-300">{categoryLabel(e.category)}</span>
+                        {e.article_id !== null && (
+                          <a href={`/articles/${e.article_id}`} className="text-indigo-400 hover:text-indigo-300">
+                            article #{e.article_id}
+                          </a>
+                        )}
+                        <span className="ml-auto text-gray-600">{fmtDate(e.at)}</span>
+                      </div>
+                      <p className="text-gray-300 leading-relaxed">{e.summary}</p>
+                      <details className="mt-1">
+                        <summary className="cursor-pointer text-gray-500 hover:text-gray-400 select-none">détail technique</summary>
+                        <pre className="mt-1 text-gray-400/80 whitespace-pre-wrap break-all font-mono leading-relaxed">{e.detail}</pre>
+                      </details>
+                    </div>
+                  );
+                })}
+                {data.pipeline_errors.length === 0 && (
+                  <p className="text-xs text-gray-500 pb-2">
+                    Aucune erreur récente en mémoire (les compteurs cumulés datent du démarrage du conteneur).
+                  </p>
+                )}
+              </div>
+            </div>
           </div>
         </details>
       )}

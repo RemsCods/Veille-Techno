@@ -62,7 +62,7 @@ def run_relevance_gate(batch: int = 30) -> int:
             except Exception as exc:
                 db.rollback()
                 # Count it (parked after the cap); else stays 'collecte' for retry
-                _stats.record_gate_error(article_id, f"{type(exc).__name__}: {exc}")
+                _stats.record_gate_error(article_id, exc)
                 _bump_error(db, article_id, f"gate: {type(exc).__name__}: {exc}")
     finally:
         with _claim_lock:
@@ -105,7 +105,7 @@ def _classify_stragglers(batch: int = 10) -> int:
                 count += 1
             except Exception as exc:
                 db.rollback()
-                _stats.record_gate_error(article.id, f"straggler: {type(exc).__name__}: {exc}")
+                _stats.record_gate_error(article.id, exc, context="straggler")
     finally:
         db.close()
     return count
