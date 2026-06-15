@@ -1226,7 +1226,57 @@ la principale monte bien à 18-20/min et « 75 in progress » pendant un vrai pu
 
 ---
 
-## État du projet — juin 2026 (après session 21)
+## Session 22 — 15 juin 2026 : Classification des erreurs + fix deadlock fact_checks
+
+### Problème (demande utilisateur)
+Le **Pipeline monitor** (page Admin) affichait les erreurs en **brut** — `f"{type(exc).__name__}: {exc}"`
+empilées chronologiquement dans des `<pre>`. Impossible de voir d'un coup d'œil **la cause dominante**
+ni **la gravité**. Sur le screenshot : « 7 pipeline errors » dont `score: 4` = des **deadlocks MySQL
+(1213)** sur l'`INSERT INTO fact_checks`, traités comme des échecs définitifs.
+
+### Cause racine du deadlock (la vraie surprise)
+Ce n'était pas qu'une affaire de concurrence : `score_fact_check` faisait son `DELETE fact_checks`
+**en premier**, puis **gardait ces verrous pendant les longs appels LLM** (les deux modèles de
+fact-check, plusieurs secondes) avant l'`INSERT` + `commit`. Trois threads scorer en parallèle, chacun
+tenant des verrous sur `fact_checks` (+ la FK vers `articles`) pendant des secondes → attente
+circulaire quasi garantie.
+
+### Fix racine (`confidence.py`)
+- **Réordonnancement** : les appels LLM se font d'abord, **hors transaction** ; le `DELETE`+`INSERT`+
+  `commit` est regroupé à la fin (quelques ms).
+- **Sérialisation** : un `threading.Lock()` module (`_fact_check_write_lock`, même idiome que le
+  `_claim_lock` du scorer) entoure cette courte section → élimine la collision entre les 3 threads.
+- **Retry de sécurité** : la section est passée à `with_db_retry` (backoff sur 1213/1020/1205,
+  `on_retry=db.rollback`). **Un deadlock résolu au retry n'est PAS compté comme erreur** → le bruit
+  `score: 4` disparaît.
+
+### Classification des erreurs (`errors.py`, nouveau)
+- `classify_error(exc, context) → {category, severity, summary, detail}` : déballe l'erreur
+  SQLAlchemy via `.orig` pour lire le code MySQL ; reconnaît les erreurs httpx d'Ollama
+  (timeout / connexion / `HTTPStatusError`). Catégories : `db_deadlock`, `db_lock_timeout`,
+  `db_connection`, `db_error`, `llm_timeout`, `llm_json`, `llm_unavailable`, `http_error`, `unknown`.
+  Échelle de gravité : **transitoire < avertissement < erreur < critique**.
+- `with_db_retry(fn, on_retry, attempts, codes)` : réutilisable, reprend le motif de
+  `scripts/normalize_existing_tags.py` adapté aux sessions SQLAlchemy.
+
+### Agrégation + UI
+- `pipeline_stats` : les `record_*_error` prennent désormais **l'objet exception** (+ `context`),
+  classent, stockent `category/severity/summary/detail` par entrée et **agrègent par cause**
+  (`_error_by_category`). `snapshot()` renvoie `error_categories` (plus grosse cause en tête).
+- API (`routers/stats.py`) : `PipelineErrorOut` enrichi (le champ `message` devient
+  `summary`+`detail`) ; nouveau `pipeline_error_categories`.
+- Monitor (`Admin.tsx`) : en-tête « cause principale », bloc **« Répartition par cause »** (barres + %),
+  cartes d'erreur **colorées par gravité** avec le traceback brut **replié** dans un `<details>`.
+
+### Vérifié
+Tests unitaires `classify_error` (10 cas) + `with_db_retry` (récupération / non-retryable / épuisement)
+au vert ; chemin complet `pipeline_stats` (classification → totaux → agrégat) ; `tsc -b` + `vite build`
+verts. Déployé : `/stats/admin` expose `pipeline_error_categories` (vide après redémarrage = le fix
+deadlock tient). **Aucune migration** (agrégation 100 % en mémoire).
+
+---
+
+## État du projet — juin 2026 (après session 22)
 
 ### Fonctionnalités en production
 - ✅ Collecte automatique (~24 sources, RSS + arXiv + HN) — filtre HN corrigé (word boundaries)
@@ -1241,8 +1291,9 @@ la principale monte bien à 18-20/min et « 75 in progress » pendant un vrai pu
   + retrain horaire
 - ✅ Déduplication sémantique par cluster + badge "N similar"
 - ✅ Feed : recherche + chips tags + filtres + tri (dont pertinence et incertitude)
-- ✅ Admin : monitoring pipeline (6 statuts), **erreurs pipeline détaillées**, répartition
-  pertinence, gestion des ancres, carte ML, sparklines, gestion sources
+- ✅ Admin : monitoring pipeline (6 statuts), **erreurs pipeline classées par cause + gravité**
+  (deadlock retry, articles parqués), répartition pertinence, gestion des ancres, carte ML,
+  sparklines, gestion sources
 - ✅ Page documentation interne refaite user-friendly (résumé 30 s, section pertinence)
 - ✅ **Re-vérification idle** : versionnage de pipeline + reviewer qui re-traite les
   articles legacy quand la pipeline est au repos (ancien → nouveau score, panneau admin)
@@ -1254,4 +1305,4 @@ la principale monte bien à 18-20/min et « 75 in progress » pendant un vrai pu
 
 ---
 
-*Dernière mise à jour : 14 juin 2026*
+*Dernière mise à jour : 15 juin 2026*

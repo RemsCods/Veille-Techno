@@ -146,7 +146,7 @@ Score = 0.40 × score_source
 
 **`score_source` (40%)** — Static reliability score assigned to the source in the database (0–100). Reflects editorial standards, track record, and domain authority. Determined at seed time, adjustable by admins.
 
-**`score_corroboration` (30%)** — Measures how many **independent** sources cover the same topic within **±72 h of the article's own collection time** (not "now", so re-scoring an old article still finds its contemporaries). Computed via cosine similarity on article embeddings (threshold **≥ 0.78**, calibrated for nomic-embed-text's compressed cosine space — same-story pairs sit at ~0.78–0.85, random AI pairs below ~0.72; an earlier 0.85 was above the real max of near-duplicates so corroboration never fired). Key insight: corroboration only counts when sources are genuinely independent — the same article republished on 5 aggregators is not corroboration.
+**`score_corroboration` (30%)** — Measures how many **independent** sources cover the same topic within **±72 h of the article's own collection time** (not "now", so re-scoring an old article still finds its contemporaries). Computed via cosine similarity on article embeddings (threshold **≥ 0.78**, calibrated for nomic-embed-text's compressed cosine space — same-story pairs sit at ~0.78–0.85, random AI pairs below ~0.72; an earlier 0.85 was above the real max of near-duplicates so corroboration never fired). Key insight: corroboration only counts when sources are genuinely independent — the same article republished on 5 aggregators is not corroboration. Feed **deduplication** (clustering) is *decoupled* and uses a stricter cosine **≥ 0.88** (`CLUSTER_COSINE_THRESHOLD`, near-identical reposts only), so the looser scoring threshold can't chain same-topic articles into mega-clusters.
 
 **`score_fact_check` (20%)** — **Dual-model** pass: two cross-family local LLMs (`qwen3.5:9b` + `llama3.2:3b`) each extract verifiable claims and mark them *supported* / *unsupported* / *unverifiable*. Their verdicts are merged by consensus — agreement keeps the verdict, a *supported* vs *unsupported* clash becomes *contested* (half credit), and any *unverifiable* is treated conservatively. Score = (supported + ½·contested) / total verifiable claims. Falls back gracefully if one model is unavailable.
 
@@ -381,6 +381,8 @@ Exposed by the `app` container. The full interactive doc is available at `/docs`
 | `GET` | `/articles/{id}` | Article detail + corroborations + fact-check + relevance breakdown |
 | `PUT` | `/articles/{id}/feedback` | Human relevance verdict 👍/👎 (`{"verdict": "pertinent"\|"non_pertinent"}`) |
 | `DELETE` | `/articles/{id}/feedback` | Remove the verdict (bucket recomputed from margin) |
+| `POST` | `/articles/{id}/reprocess` | Re-run a parked/failed article (reset to `collecte`, `error_count=0`, keeps old score) |
+| `DELETE` | `/articles/{id}` | Delete an article + dependent rows (corroborations, fact-checks, embeddings, tags, feedback) |
 | `GET/POST/PATCH/DELETE` | `/relevance/anchors[/{id}]` | Manage the watch-scope anchors (positive/negative) |
 | `GET` | `/relevance/model` | Active-learning classifier status |
 | `POST` | `/relevance/retrain` | Retrain the classifier now |
@@ -393,7 +395,7 @@ Exposed by the `app` container. The full interactive doc is available at `/docs`
 | `POST` | `/blacklist` | Add domain to blacklist |
 | `DELETE` | `/blacklist/{id}` | Remove from blacklist |
 | `GET` | `/stats` | System-level metrics (volume, avg score, % reliable) |
-| `GET` | `/stats/admin` | Full dashboard: pipeline funnel, throughput/ETAs, errors, relevance + re-review progress |
+| `GET` | `/stats/admin` | Full dashboard: pipeline funnel, throughput/ETAs, errors grouped by cause + severity, parked articles, relevance + re-review progress |
 | `GET` | `/stats/db` | Per-table row counts and storage size |
 | `GET` | `/health` | Liveness check |
 
@@ -407,7 +409,7 @@ Four pages:
 
 **Article Detail** (`/articles/:id`) — Full article view with LLM summary, relevance breakdown, confidence score breakdown by component, corroborating articles, and dual-model fact-check results. Re-reviewed articles show the **old → new score**.
 
-**Admin** (`/admin`) — Live pipeline monitor (throughput, ETAs, error logs), per-source pipeline breakdown + source CRUD, watch-scope anchor editor, active-learning classifier status, and the **re-review (quality assurance)** panel.
+**Admin** (`/admin`) — Live pipeline monitor (throughput, ETAs, **errors grouped by cause + severity** with the dominant cause surfaced, parked-article re-run/delete), per-source pipeline breakdown + source CRUD, watch-scope anchor editor, active-learning classifier status, and the **re-review (quality assurance)** panel.
 
 **Docs** (`/docs-page`) — In-app documentation of the methodology and pipeline.
 
@@ -448,7 +450,8 @@ veille-tracker/
 │   ├── confidence.py          # Confidence formula (dual-model fact-check)
 │   ├── relevance.py           # Contrastive anchor gate + signal merge
 │   ├── tag_normalizer.py      # Tag canonicalisation
-│   ├── pipeline_stats.py      # In-memory throughput / error telemetry
+│   ├── errors.py              # Error classification (cause + severity) + DB deadlock-retry helper
+│   ├── pipeline_stats.py      # In-memory throughput + errors aggregated by cause/severity
 │   ├── scripts/               # backfill_relevance, calibrate_*, one-off migrations
 │   └── routers/
 │       ├── articles.py
@@ -548,6 +551,7 @@ DB_PORT=3306
 DB_NAME=veille
 DB_USER=veille
 DB_PASSWORD=changeme
+DB_ROOT_PASSWORD=rootchangeme
 
 # Ollama (LXC-AI address)
 OLLAMA_HOST=http://192.168.x.x:11434
@@ -561,7 +565,8 @@ ARXIV_COLLECT_INTERVAL=0 */2 * * *
 
 # Confidence
 CORROBORATION_WINDOW_HOURS=72
-CORROBORATION_COSINE_THRESHOLD=0.85
+CORROBORATION_COSINE_THRESHOLD=0.78    # scoring: same-story coverage (calibrated for nomic's compressed cosine)
+CLUSTER_COSINE_THRESHOLD=0.88          # feed dedup: near-identical reposts only (stricter — avoids mega-clusters)
 RELIABILITY_THRESHOLD=70
 
 # Relevance gate (contrastive margin thresholds)
@@ -570,8 +575,14 @@ RELEVANCE_T_HIGH=0.05                  # ≥ this → on_topic
 
 # Idle re-review
 REVIEW_ENABLED=true
-REVIEW_BATCH=8                         # legacy articles re-injected per idle cycle
+REVIEW_BATCH=8                         # legacy articles re-injected per idle burst
+REVIEW_COOLDOWN_MINUTES=5              # reviewer also pauses this long after any collection
+REVIEW_INTERVAL_SECONDS=240            # minimum gap between re-review bursts (rests at 100% in between)
 ```
+
+> A pipeline-stage failure also bumps `articles.error_count`; after `MAX_PIPELINE_ATTEMPTS` (`config.py`,
+> default **3**) consecutive failures the article is *parked* — no longer auto-claimed — and surfaced in
+> the admin for manual re-run or deletion. A success resets the counter, so transient errors self-heal.
 
 > Note: the app is published on host port **8001** (`8001:8000`); the examples below
 > using `:8000` refer to the in-container port.
@@ -592,6 +603,9 @@ REVIEW_BATCH=8                         # legacy articles re-injected per idle cy
 | 2026-05-XX | Custom admin pages → FastAPI Swagger UI | Saves frontend development time with no functional loss |
 | 2026-06-12 | Relevance as an axis orthogonal to confidence (contrastive anchor gate + LLM verdict + active learning) | A reliable source can still be off-topic; spam was burning LLM budget |
 | 2026-06-13 | Idle re-review with `pipeline_version` tracking | Bring legacy scores up to date gradually, without a disruptive mass reprocess |
+| 2026-06-14 | Corroboration cosine **0.78**, clustering **decoupled at 0.88** | nomic's cosine is compressed; 0.85 never fired, and a shared loose threshold chained same-topic articles into mega-clusters |
+| 2026-06-14 | Per-article `error_count` parking + bounded stats deques | A poison article retried every cycle leaked memory (RAM incident); cap retries at `MAX_PIPELINE_ATTEMPTS`, self-heal on success |
+| 2026-06-15 | Error classification (cause + severity) + deadlock retry/serialization on fact-check writes | Raw tracebacks hid the dominant cause; the `fact_checks` deadlock held locks across slow LLM calls — fixed at the root |
 
 ---
 
@@ -603,4 +617,4 @@ REVIEW_BATCH=8                         # legacy articles re-injected per idle cy
 
 ---
 
-*Last updated: 13 June 2026*
+*Last updated: 15 June 2026*

@@ -84,6 +84,7 @@ const TOC = [
   { id: "cluster",        label: "Déduplication par cluster" },
   { id: "tags",           label: "Normalisation des tags" },
   { id: "sources",        label: "Sources & collecte" },
+  { id: "monitoring",     label: "Monitoring & erreurs" },
   { id: "api",            label: "API REST" },
 ];
 
@@ -721,7 +722,11 @@ Reply ONLY with JSON:
           <Sub title="Étape 4 — Scoring (3 workers en parallèle)">
             <P>
               Calcule le score de confiance sur 100 en combinant 4 composantes. Voir la section
-              dédiée ci-dessous pour la formule complète.
+              dédiée ci-dessous pour la formule complète. Les appels LLM (fact-check) tournent en
+              parallèle, mais l'écriture des résultats <code className="text-indigo-300 bg-gray-900 px-1 rounded">fact_checks</code> est{" "}
+              <strong className="text-gray-300">sérialisée + ré-essayée</strong> entre les 3 workers
+              (voir <a href="#monitoring" className="text-indigo-400 hover:text-indigo-300">Monitoring & erreurs</a>)
+              pour éviter les deadlocks.
             </P>
           </Sub>
 
@@ -864,8 +869,11 @@ marge ≥ +0.05          → on_topic    (continue)`}</Code>
           <Sub title="Composante 2 — Corroboration (30%)">
             <P>
               Mesure combien d'articles d'<em>autres sources</em> confirment la même information
-              dans une fenêtre temporelle de 72 heures. La similarité est calculée par cosinus
-              sur les vecteurs d'embedding (seuil : 0.85).
+              dans une fenêtre de 72 heures <strong className="text-gray-300">centrée sur la date de
+              collecte de l'article</strong> (±72h, pas « maintenant » — un vieil article retrouve ainsi
+              ses contemporains lors d'un re-scoring). La similarité est calculée par cosinus sur les
+              vecteurs d'embedding (seuil : <strong className="text-gray-300">0.78</strong>, calibré pour
+              l'espace cosinus compressé de nomic).
             </P>
             <Table
               headers={["Nombre de sources qui corroborent", "Score corroboration"]}
@@ -878,7 +886,7 @@ marge ≥ +0.05          → on_topic    (continue)`}</Code>
               ]}
             />
             <P>
-              La fenêtre de 72h et le seuil cosinus 0.85 sont configurables via les variables
+              La fenêtre de 72h et le seuil cosinus 0.78 sont configurables via les variables
               d'environnement <code className="text-indigo-300 bg-gray-900 px-1 rounded">CORROBORATION_WINDOW_HOURS</code> et{" "}
               <code className="text-indigo-300 bg-gray-900 px-1 rounded">CORROBORATION_COSINE_THRESHOLD</code>.
             </P>
@@ -905,15 +913,20 @@ Exemple : 3 claims vérifiables, 2 "supported", 1 "contested"
               de publication) et la <strong className="text-gray-300">complétude</strong> (métadonnées).
               Historiquement les deux étaient mélangés dans une somme opaque dont le maximum réel
               était 85/100 — ils sont désormais séparés et le détail est visible sur la page article.
+              La récence utilise des <strong className="text-gray-300">planchers</strong> (40 pour les
+              vieux articles, 50 si la date est inconnue) plutôt que 0 : re-scorer un vieil article ne
+              fait plus s'effondrer son score.
             </P>
             <Code>{`freshness = (recency + completeness) / 2`}</Code>
             <Table
               headers={["Sous-score", "Critère", "Valeur"]}
               rows={[
                 ["Récence",    "Publié < 24h",                 "100"],
-                ["Récence",    "Publié < 72h",                 "60"],
-                ["Récence",    "Publié < 7 jours",             "25"],
-                ["Récence",    "> 7 jours ou date inconnue",   "0"],
+                ["Récence",    "Publié < 3 jours",             "80"],
+                ["Récence",    "Publié < 7 jours",             "65"],
+                ["Récence",    "Publié < 30 jours",            "50"],
+                ["Récence",    "> 30 jours",                   "40 (plancher)"],
+                ["Récence",    "Date inconnue",                "50"],
                 ["Complétude", "Auteur identifié",             "+40"],
                 ["Complétude", "Contenu > 500 caractères",     "+60"],
                 ["Complétude", "Contenu entre 100 et 500 car.","+25"],
@@ -1033,7 +1046,7 @@ Fusion index par index :
   1. Charger le cache vectoriel (tous les embeddings < 72h, sources différentes)
   2. Calculer la similarité cosinus entre A et chaque article du cache
      sim(A, B) = (A · B) / (|A| × |B|)
-  3. Si sim ≥ 0.85 → B corrobore A
+  3. Si sim ≥ 0.78 → B corrobore A
      → Stocker dans corroborations(article_id=A, similar_article_id=B, score=sim)
   4. Comptage → score corroboration (voir tableau section Score)`}</Code>
           </Sub>
@@ -1064,6 +1077,17 @@ sims   = (matrix @ vec_a) / (norms_b × norm_a)       # N similarités en 1 opé
               pour identifier les groupes d'articles similaires. Au sein de chaque groupe,
               l'article avec le meilleur <code className="text-indigo-300 bg-gray-900 px-1 rounded">confidence_score</code> est désigné
               comme canonique.
+            </P>
+            <P>
+              <strong className="text-yellow-400">Seuil découplé du scoring :</strong> le clustering
+              n'utilise <em>pas</em> le seuil de corroboration 0.78 mais un seuil plus strict{" "}
+              <code className="text-indigo-300 bg-gray-900 px-1 rounded">CLUSTER_COSINE_THRESHOLD = 0.88</code>{" "}
+              (reposts quasi identiques uniquement). Avec 0.78 partagé, la fermeture transitive
+              chaînait des articles <em>même-thème</em> (pas même-histoire) en méga-clusters — un blob
+              de 360 articles OpenAI — qui aurait vidé le feed. À 0.88 la taille max de cluster retombe
+              à ~6, et les articles couvrant le même évènement mais rédigés différemment ne fusionnent
+              pas (ce ne sont pas des doublons) : ils portent à la place un <em>score</em> de
+              corroboration élevé.
             </P>
             <Code>{`Articles {A, B, C} couvrent le même sujet :
   A (score 78, arXiv)     ← canonique (meilleur score)
@@ -1162,6 +1186,78 @@ B et C sont masqués (deduplicate=true par défaut)`}</Code>
           </Sub>
         </Section>
 
+        {/* ── 8b. Monitoring & erreurs ── */}
+        <Section id="monitoring" title="Monitoring & erreurs">
+          <P>
+            Le pipeline tourne en continu sur trois workers concurrents par étape : des erreurs
+            transitoires (deadlock DB, timeout LLM) sont normales. Plutôt que d'empiler des tracebacks
+            bruts, le moniteur <strong className="text-gray-300">classe chaque erreur par cause et par
+            gravité</strong> et fait ressortir le <strong className="text-gray-300">plus gros
+            responsable</strong>. Les erreurs réellement transitoires sont ré-essayées et n'apparaissent
+            même pas.
+          </P>
+
+          <Sub title="Le moniteur (page Admin)">
+            <P>
+              Le bandeau « pipeline errors since startup » indique la <strong className="text-gray-300">cause
+              principale</strong>. Dépliée, la carte montre une <strong className="text-gray-300">répartition
+              par cause</strong> (barres + %, triée par fréquence) puis les dernières erreurs sous forme de
+              cartes <strong className="text-gray-300">colorées selon la gravité</strong> — résumé lisible en
+              clair, traceback technique replié dans un <code className="text-indigo-300 bg-gray-900 px-1 rounded">détail</code> sur demande.
+              Les compteurs sont en mémoire (remis à zéro au redémarrage du conteneur).
+            </P>
+          </Sub>
+
+          <Sub title="Échelle de gravité">
+            <Table
+              headers={["Gravité", "Sens", "Exemple"]}
+              rows={[
+                [<Badge color="bg-slate-700/60 text-slate-300">transitoire</Badge>, "Auto-récupéré — ré-essayé avec succès, sans impact", "Deadlock DB résolu au retry"],
+                [<Badge color="bg-amber-900/50 text-amber-300">avertissement</Badge>, "Dégradé mais le pipeline continue (fallback / retry de l'article)", "Timeout LLM, JSON LLM invalide"],
+                [<Badge color="bg-red-900/50 text-red-300">erreur</Badge>, "L'article échoue cette étape ; re-tenté jusqu'au plafond", "Ollama injoignable, connexion DB perdue"],
+                [<Badge color="bg-red-700/70 text-red-100">critique</Badge>, "Échec répété — article parqué", "error_count ≥ MAX_PIPELINE_ATTEMPTS"],
+              ]}
+            />
+          </Sub>
+
+          <Sub title="Catégories d'erreurs">
+            <Table
+              headers={["Catégorie", "Origine"]}
+              rows={[
+                ["db_deadlock / db_lock_timeout", "Verrous concurrents MySQL (1213/1020/1205) — transitoire, ré-essayé"],
+                ["db_connection / db_error",      "Connexion DB perdue ou autre erreur SQL"],
+                ["llm_timeout",                   "Délai dépassé sur un appel Ollama (httpx)"],
+                ["llm_json",                      "Réponse du modèle non parsable (JSON) → fallback dégradé"],
+                ["llm_unavailable",               "Ollama injoignable ou en erreur 5xx"],
+                ["http_error",                    "Erreur HTTP sur une requête externe"],
+                ["unknown",                       "Exception non classée (fallback)"],
+              ]}
+            />
+          </Sub>
+
+          <Sub title="Résilience : retry deadlock + articles parqués">
+            <P>
+              <strong className="text-gray-300">Deadlock fact_checks.</strong> Les 3 workers de scoring
+              écrivent dans la même table <code className="text-indigo-300 bg-gray-900 px-1 rounded">fact_checks</code>.
+              Les appels LLM (lents) tournent en parallèle, mais la courte écriture
+              (DELETE + INSERT + commit) est <strong className="text-gray-300">sérialisée par un verrou</strong>{" "}
+              puis <strong className="text-gray-300">ré-essayée avec backoff</strong> en cas de deadlock
+              (codes 1213/1020/1205) : un deadlock résolu au retry n'est pas compté comme erreur.
+            </P>
+            <P>
+              <strong className="text-gray-300">Articles parqués.</strong> Chaque échec d'étape incrémente{" "}
+              <code className="text-indigo-300 bg-gray-900 px-1 rounded">articles.error_count</code> et mémorise{" "}
+              <code className="text-indigo-300 bg-gray-900 px-1 rounded">last_error</code>. Après{" "}
+              <code className="text-indigo-300 bg-gray-900 px-1 rounded">MAX_PIPELINE_ATTEMPTS</code> (3) échecs
+              consécutifs, l'article est <strong className="text-gray-300">parqué</strong> (plus réclamé par les
+              workers) pour ne pas boucler indéfiniment ; un succès remet le compteur à 0 (les erreurs
+              transitoires s'auto-réparent). Les articles parqués sont listés dans l'Admin avec
+              re-traitement (<code className="text-indigo-300 bg-gray-900 px-1 rounded">reprocess</code>) ou
+              suppression à l'unité.
+            </P>
+          </Sub>
+        </Section>
+
         {/* ── 9. API ── */}
         <Section id="api" title="API REST">
           <P>
@@ -1180,6 +1276,8 @@ B et C sont masqués (deduplicate=true par défaut)`}</Code>
                 ["GET", "/articles/tags/popular", "Top N tags avec comptage"],
                 ["PUT", "/articles/{id}/feedback", "Verdict humain 👍/👎 (body: {verdict})"],
                 ["DELETE", "/articles/{id}/feedback", "Retirer le verdict (bucket recalculé)"],
+                ["POST", "/articles/{id}/reprocess", "Re-traiter un article parqué/en erreur (reset collecte, error_count=0)"],
+                ["DELETE", "/articles/{id}", "Supprimer l'article + lignes dépendantes (corroborations, fact-checks, embeddings, tags)"],
               ]}
             />
             <Code>{`# Paramètres GET /articles
@@ -1228,7 +1326,7 @@ B et C sont masqués (deduplicate=true par défaut)`}</Code>
               headers={["Méthode", "Endpoint", "Description"]}
               rows={[
                 ["GET", "/stats",        "Statistiques globales (total, fiabilité, avg score)"],
-                ["GET", "/stats/admin",  "Monitoring complet pipeline, sources, logs, distribution"],
+                ["GET", "/stats/admin",  "Monitoring complet : pipeline, débit/ETA, erreurs par cause + gravité, articles parqués, distribution"],
                 ["GET", "/stats/db",     "Taille des tables en MB"],
                 ["GET", "/health",       "Health check"],
               ]}
